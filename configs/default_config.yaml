@@ -1,0 +1,84 @@
+# Default configuration for NAR Mechanistic Interpretability experiments
+
+# Model configuration
+model:
+  hidden_dim: 128
+  num_layers: 4
+  num_heads: 8
+  dropout: 0.0
+  layer_norm: true
+  processor_type: "mpnn"  # Options: mpnn, gat, transformer
+  use_gating: true
+  encode_hints: true
+  decode_hints: true
+
+# Training configuration
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  scheduler: "cosine"  # Options: cosine, step, plateau
+  warmup_epochs: 5
+  gradient_clip: 1.0
+  early_stopping_patience: 10
+  
+# Dataset configuration
+data:
+  train_samples: 1000
+  val_samples: 128
+  test_samples: 128
+  # Problem sizes for CLRS-30
+  train_lengths: [4, 7, 11, 13, 16]
+  eval_length: 16
+  test_length: 64  # OOD generalization test
+  algorithms:
+    - "bfs"
+    - "dfs" 
+    - "dijkstra"
+    - "bellman_ford"
+    - "insertion_sort"
+    - "bubble_sort"
+    - "heapsort"
+  seed: 42
+
+# ACDC Configuration
+acdc:
+  # Threshold for edge importance (edges below this are pruned)
+  threshold: 0.01
+  # Number of patching samples
+  num_samples: 100
+  # Metric for measuring circuit fidelity
+  metric: "kl_divergence"  # Options: kl_divergence, logit_diff, accuracy
+  # Maximum iterations for iterative pruning
+  max_iterations: 100
+  # Batch size for activation patching
+  patch_batch_size: 16
+  # Whether to use mean ablation or zero ablation
+  ablation_type: "mean"  # Options: mean, zero, resample
+  # Components to consider for circuit discovery
+  components:
+    - "attention"
+    - "mlp"
+    - "message_passing"
+    - "node_update"
+    - "edge_update"
+  # Whether to discover separate circuits per algorithm
+  per_algorithm: true
+
+# Experiment tracking
+logging:
+  project_name: "nar-mechinterp"
+  use_wandb: true
+  log_every: 10
+  save_every: 100
+  checkpoint_dir: "checkpoints"
+  results_dir: "results"
+  circuits_dir: "circuits"
+
+# Hardware
+hardware:
+  device: "cuda"  # Options: cuda, cpu, mps
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: false
