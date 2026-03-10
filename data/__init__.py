@@ -1,19 +1,25 @@
-"""Data loading utilities for CLRS-30."""
+"""Data loading utilities for CLRS-30 via salsa-clrs."""
 
 from .clrs_dataset import (
-    CLRSDataset,
+    AVAILABLE_ALGORITHMS,
+    AlgorithmSpec,
     CLRSBatch,
-    Algorithm,
+    get_clrs_dataset,
     get_clrs_dataloader,
     get_algorithm_spec,
-    collate_clrs_batch,
+    spec_to_model_types,
+    batch_to_model_inputs,
+    pyg_to_dense,
 )
 
 __all__ = [
-    "CLRSDataset",
-    "CLRSBatch", 
-    "Algorithm",
+    "AVAILABLE_ALGORITHMS",
+    "AlgorithmSpec",
+    "CLRSBatch",
+    "get_clrs_dataset",
     "get_clrs_dataloader",
     "get_algorithm_spec",
-    "collate_clrs_batch",
+    "spec_to_model_types",
+    "batch_to_model_inputs",
+    "pyg_to_dense",
 ]

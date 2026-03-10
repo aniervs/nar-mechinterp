@@ -14,7 +14,6 @@ Modules:
 
 __version__ = "0.1.0"
 
-from . import data
-from . import models
-from . import interp
-from . import utils
+# Subpackages are imported directly: `from models import NARModel`, etc.
+# This file exists to mark the root as a Python package for relative
+# imports within subpackages.
