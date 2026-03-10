@@ -8,13 +8,10 @@ Usage:
 """
 
 import argparse
-import sys
 from pathlib import Path
 import json
 
 import torch
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data import get_clrs_dataloader, get_algorithm_spec
 from models import NARModel
@@ -63,6 +60,7 @@ def main():
     args = parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(args.seed)
     print(f"Device: {device}")
     
     output_dir = Path(args.output_dir)
@@ -91,7 +89,6 @@ def main():
         max_iterations=args.max_iterations,
         num_samples=args.num_samples,
         batch_size=args.batch_size,
-        seed=args.seed,
     )
     
     print(f"\nACDC Configuration:")
@@ -106,7 +103,7 @@ def main():
     print(f"{'='*60}")
     
     acdc = ACDC(model, config, device)
-    result = acdc.run(dataloader, output_types, args.algorithm, show_progress=True)
+    result = acdc.run(dataloader, algorithm=args.algorithm)
     
     # Results summary
     print(f"\n{'='*60}")
@@ -114,8 +111,8 @@ def main():
     print(f"{'='*60}")
     print(f"  Circuit nodes: {len(result.circuit.nodes)}")
     print(f"  Circuit edges: {len(result.circuit.edges)}")
-    print(f"  Final fidelity: {result.fidelity:.4f}")
-    print(f"  Pruning iterations: {len(result.pruning_history)}")
+    print(f"  Final fidelity: {result.final_fidelity:.4f}")
+    print(f"  Pruning iterations: {len(result.history)}")
     
     # Save circuit
     circuit_path = output_dir / f"{args.algorithm}_circuit.json"
@@ -124,7 +121,7 @@ def main():
     
     # Save full results
     results_path = output_dir / f"{args.algorithm}_acdc_results.json"
-    result.save(str(results_path))
+    acdc.save_result(result, str(results_path))
     print(f"Full results saved to: {results_path}")
     
     # Save plots
@@ -137,8 +134,9 @@ def main():
             )
             print(f"Circuit plot saved")
             
+            edge_scores = {f"{s}->{t}": score for s, t, score in result.pruned_edges}
             plot_edge_importance(
-                result.edge_scores,
+                edge_scores,
                 title=f"Edge Importance for {args.algorithm}",
                 save_path=str(output_dir / f"{args.algorithm}_importance.png"),
             )

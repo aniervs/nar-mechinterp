@@ -57,17 +57,57 @@ class CircuitEdge:
 class Circuit:
     """
     A computational circuit discovered through interpretability analysis.
-    
+
     Represents a subgraph of the full model that is sufficient
     for performing a specific task.
     """
-    nodes: List[CircuitNode]
-    edges: List[CircuitEdge]
+    nodes: List[CircuitNode] = field(default_factory=list)
+    edges: List[CircuitEdge] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
+    name: str = ""
+
     def __post_init__(self):
         """Build lookup dictionaries."""
         self._node_dict = {n.id: n for n in self.nodes}
+        self._edge_dict = {e.id: e for e in self.edges}
+        self._adjacency = self._build_adjacency()
+
+    def add_node(self, id: str, type: str, layer: int = 0, component: str = "", **kwargs) -> CircuitNode:
+        """Add a node to the circuit."""
+        metadata = kwargs.copy()
+        if component:
+            metadata['component'] = component
+        node = CircuitNode(id=id, type=type, layer=layer, metadata=metadata)
+        self.nodes.append(node)
+        self._node_dict[id] = node
+        self._adjacency[id] = self._adjacency.get(id, [])
+        return node
+
+    def add_edge(self, source: str, target: str, weight: float = 1.0, edge_type: str = "", **kwargs) -> CircuitEdge:
+        """Add an edge to the circuit."""
+        edge_id = f"{source}->{target}"
+        metadata = kwargs.copy()
+        if edge_type:
+            metadata['edge_type'] = edge_type
+        edge = CircuitEdge(id=edge_id, source=source, target=target, weight=weight, metadata=metadata)
+        self.edges.append(edge)
+        self._edge_dict[edge_id] = edge
+        if source in self._adjacency:
+            self._adjacency[source].append(target)
+        return edge
+
+    def remove_edge(self, source: str, target: str):
+        """Remove an edge by source and target."""
+        self.edges = [e for e in self.edges if not (e.source == source and e.target == target)]
+        edge_id = f"{source}->{target}"
+        self._edge_dict.pop(edge_id, None)
+        self._adjacency = self._build_adjacency()
+
+    def remove_node(self, node_id: str):
+        """Remove a node and all its incident edges."""
+        self.nodes = [n for n in self.nodes if n.id != node_id]
+        self._node_dict.pop(node_id, None)
+        self.edges = [e for e in self.edges if e.source != node_id and e.target != node_id]
         self._edge_dict = {e.id: e for e in self.edges}
         self._adjacency = self._build_adjacency()
     
@@ -394,3 +434,72 @@ def find_shared_subcircuit(circuits: List[Circuit]) -> Circuit:
         edges=edges,
         metadata={'shared_across': len(circuits)},
     )
+
+
+def create_full_circuit_from_model(model: nn.Module, name: str = "full_model") -> Circuit:
+    """
+    Build a full circuit representation from a PyTorch model.
+
+    Traverses model modules and creates a circuit node for each leaf module,
+    with edges connecting adjacent layers.
+
+    Args:
+        model: PyTorch model to analyze
+        name: Name for the circuit
+
+    Returns:
+        Circuit representing the full model
+    """
+    circuit = Circuit(name=name)
+
+    # Add input node
+    circuit.add_node("input", "input", layer=0, component="input")
+
+    # Traverse model to find leaf components
+    for mod_name, module in model.named_modules():
+        if len(list(module.children())) > 0:
+            continue  # Skip container modules
+
+        # Determine component type
+        lower = mod_name.lower()
+        if 'attention' in lower:
+            node_type = "attention"
+        elif 'mlp' in lower or 'linear' in lower:
+            node_type = "mlp"
+        elif 'message' in lower:
+            node_type = "message_passing"
+        elif 'node' in lower:
+            node_type = "node_update"
+        elif 'edge' in lower:
+            node_type = "edge_update"
+        else:
+            node_type = "unknown"
+
+        # Extract layer number from name
+        layer = 0
+        for part in mod_name.split('.'):
+            if part.isdigit():
+                layer = int(part) + 1
+                break
+
+        circuit.add_node(mod_name, node_type, layer=layer, component=mod_name)
+
+    # Add output node
+    circuit.add_node("output", "output", layer=100, component="output")
+
+    # Build edges based on layer structure
+    nodes_by_layer: Dict[int, List[str]] = {}
+    for node in circuit.nodes:
+        layer = node.layer
+        if layer not in nodes_by_layer:
+            nodes_by_layer[layer] = []
+        nodes_by_layer[layer].append(node.id)
+
+    sorted_layers = sorted(nodes_by_layer.keys())
+    for i, layer in enumerate(sorted_layers[:-1]):
+        next_layer = sorted_layers[i + 1]
+        for src in nodes_by_layer[layer]:
+            for tgt in nodes_by_layer[next_layer]:
+                circuit.add_edge(src, tgt, weight=1.0)
+
+    return circuit

@@ -16,6 +16,41 @@ import numpy as np
 from .circuit import Circuit, compare_circuits
 
 
+def kl_divergence(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """
+    Compute KL divergence between two tensors.
+
+    Treats inputs as logits and computes KL(softmax(p) || softmax(q)).
+
+    Args:
+        p: First tensor (e.g., clean model output)
+        q: Second tensor (e.g., patched model output)
+
+    Returns:
+        Scalar tensor with KL divergence
+    """
+    p_log_probs = F.log_softmax(p.flatten(start_dim=1), dim=-1)
+    q_probs = F.softmax(q.flatten(start_dim=1), dim=-1)
+    return F.kl_div(p_log_probs, q_probs, reduction='batchmean', log_target=False)
+
+
+def edge_importance_score(
+    clean_output: torch.Tensor,
+    patched_output: torch.Tensor,
+) -> float:
+    """
+    Compute importance score of an edge based on output difference.
+
+    Args:
+        clean_output: Model output without patching
+        patched_output: Model output with edge patched
+
+    Returns:
+        Importance score (higher means more important)
+    """
+    return (clean_output - patched_output).abs().mean().item()
+
+
 def compute_faithfulness(
     model: nn.Module,
     circuit: Circuit,

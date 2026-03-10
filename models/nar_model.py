@@ -335,12 +335,16 @@ class NARModel(nn.Module):
         batch_size = next(iter(inputs.values())).shape[0]
         device = next(iter(inputs.values())).device
         
-        # Default output types if not provided
+        # Default to empty dicts if not provided — callers should specify
+        # the correct output/hint types for their algorithm
         if output_types is None:
-            output_types = {'reach': 'node_mask', 'predecessor': 'node_pointer'}
-        
+            import warnings
+            warnings.warn("output_types not provided; defaulting to empty dict. "
+                         "Predictions will be empty.")
+            output_types = {}
+
         if hint_types is None:
-            hint_types = {'reach': 'node_mask', 'predecessor': 'node_pointer'}
+            hint_types = {}
         
         # Get adjacency for processor
         adjacency = inputs.get('adjacency', torch.ones(batch_size, num_nodes, num_nodes, device=device))
@@ -392,8 +396,10 @@ class NARModel(nn.Module):
                         
                     elif out_type == 'node_pointer':
                         # Cross-entropy over pointer targets
-                        if target.dim() == 2:
-                            # One-hot or probability target
+                        # pred: (batch, nodes, nodes), target: (batch, nodes) indices
+                        # or target: (batch, nodes, nodes) one-hot/probabilities
+                        if target.dim() == pred.dim():
+                            # One-hot or probability target — convert to indices
                             loss = F.cross_entropy(
                                 pred.view(-1, pred.shape[-1]),
                                 target.argmax(-1).view(-1)
@@ -426,7 +432,7 @@ class NARModel(nn.Module):
                                     step_target.float()
                                 )
                             elif hint_type == 'node_pointer':
-                                if step_target.dim() == 2:
+                                if step_target.dim() == pred.dim():
                                     loss = F.cross_entropy(
                                         pred.view(-1, pred.shape[-1]),
                                         step_target.argmax(-1).view(-1)

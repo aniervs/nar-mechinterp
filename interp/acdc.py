@@ -147,7 +147,7 @@ class ACDC:
         
         # Build edges based on layer structure
         nodes_by_layer = {}
-        for node in circuit.nodes.values():
+        for node in circuit.nodes:
             layer = node.layer
             if layer not in nodes_by_layer:
                 nodes_by_layer[layer] = []
@@ -203,7 +203,7 @@ class ACDC:
         self.full_circuit, component_names = self._build_component_graph()
         self.current_circuit = Circuit.from_dict(self.full_circuit.to_dict())
         self.current_circuit.name = f"circuit_{algorithm}" if algorithm else "discovered_circuit"
-        self.current_circuit.algorithm = algorithm
+        self.current_circuit.metadata['algorithm'] = algorithm
         
         if self.config.verbose:
             print(f"Full circuit: {len(self.full_circuit.nodes)} nodes, {len(self.full_circuit.edges)} edges")
@@ -286,8 +286,8 @@ class ACDC:
             connected_nodes.add(edge.source)
             connected_nodes.add(edge.target)
         
-        orphans = [n for n in list(self.current_circuit.nodes.keys()) 
-                  if n not in connected_nodes and n not in ('input', 'output')]
+        orphans = [n.id for n in self.current_circuit.nodes
+                  if n.id not in connected_nodes and n.id not in ('input', 'output')]
         for orphan in orphans:
             self.current_circuit.remove_node(orphan)
         
@@ -420,3 +420,43 @@ def run_acdc_experiment(
         acdc.save_result(result, save_path)
     
     return result
+
+
+def run_acdc_multi_algorithm(
+    model: nn.Module,
+    dataloaders: Dict[str, Any],
+    algorithms: List[str],
+    config: ACDCConfig = None,
+    save_dir: str = None,
+) -> Dict[str, ACDCResult]:
+    """
+    Run ACDC circuit discovery on multiple algorithms.
+
+    Args:
+        model: Neural network model
+        dataloaders: Dict mapping algorithm name to its dataloader
+        algorithms: List of algorithm names to analyze
+        config: ACDC configuration (shared across all algorithms)
+        save_dir: Optional directory to save results
+
+    Returns:
+        Dict mapping algorithm name to ACDCResult
+    """
+    results = {}
+    for algorithm in algorithms:
+        if algorithm not in dataloaders:
+            print(f"Warning: No dataloader for {algorithm}, skipping.")
+            continue
+
+        save_path = None
+        if save_dir:
+            save_path = str(Path(save_dir) / f"{algorithm}_circuit.json")
+
+        results[algorithm] = run_acdc_experiment(
+            model=model,
+            dataloader=dataloaders[algorithm],
+            algorithm=algorithm,
+            config=config,
+            save_path=save_path,
+        )
+    return results

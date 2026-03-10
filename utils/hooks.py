@@ -278,9 +278,23 @@ class ActivationPatcher:
             
             with torch.no_grad():
                 # Run forward pass to collect activations
-                _ = self.hook_manager.model(batch)
-            
-            samples_collected += len(batch)
+                if isinstance(batch, dict):
+                    _ = self.hook_manager.model(**batch)
+                elif hasattr(batch, 'inputs'):
+                    _ = self.hook_manager.model(inputs=batch.inputs)
+                else:
+                    _ = self.hook_manager.model(inputs=batch)
+
+            # Compute actual batch size from tensor shapes
+            if isinstance(batch, dict):
+                batch_sz = next(
+                    (v.shape[0] for v in batch.values() if torch.is_tensor(v)), 1
+                )
+            elif torch.is_tensor(batch):
+                batch_sz = batch.shape[0]
+            else:
+                batch_sz = 1
+            samples_collected += batch_sz
         
         # Compute means
         self._baseline_activations = {}

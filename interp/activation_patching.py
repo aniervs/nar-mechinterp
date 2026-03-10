@@ -118,7 +118,16 @@ class ActivationPatchingExperiment:
                 if name in self._activations:
                     all_activations[name].append(self._activations[name])
             
-            samples_collected += 1
+            # Increment by actual batch size, not 1
+            if isinstance(batch, dict):
+                batch_sz = next(
+                    (v.shape[0] for v in batch.values() if torch.is_tensor(v)), 1
+                )
+            elif torch.is_tensor(batch):
+                batch_sz = batch.shape[0]
+            else:
+                batch_sz = 1
+            samples_collected += batch_sz
         
         # Compute means
         for name, acts in all_activations.items():
@@ -248,3 +257,91 @@ def create_corrupted_input(
             corrupted[key] = value.clone()
     
     return corrupted
+
+
+class PathPatching:
+    """
+    Path-level activation patching.
+
+    Instead of patching a single component, patches along a specific
+    path through the computation graph to isolate the causal effect
+    of information flow along that path.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        metric_fn: Callable[[torch.Tensor, torch.Tensor], float],
+        ablation_type: str = "mean",
+        device: torch.device = None,
+    ):
+        self.experiment = ActivationPatchingExperiment(
+            model=model,
+            metric_fn=metric_fn,
+            ablation_type=ablation_type,
+            device=device,
+        )
+
+    def patch_path(
+        self,
+        clean_input: Dict[str, torch.Tensor],
+        corrupted_input: Dict[str, torch.Tensor],
+        path: List[str],
+    ) -> List[PatchingResult]:
+        """
+        Patch along a specific path and measure effects at each step.
+
+        Args:
+            clean_input: Clean model input
+            corrupted_input: Corrupted model input
+            path: List of component names forming the path
+
+        Returns:
+            List of PatchingResult for each component in the path
+        """
+        results = []
+        for component in path:
+            result = self.experiment.patch_single_component(
+                clean_input, corrupted_input, component
+            )
+            results.append(result)
+        return results
+
+
+def compute_direct_effect(
+    model: nn.Module,
+    clean_input: Dict[str, torch.Tensor],
+    corrupted_input: Dict[str, torch.Tensor],
+    component_name: str,
+    metric_fn: Callable[[torch.Tensor, torch.Tensor], float],
+    ablation_type: str = "mean",
+    device: torch.device = None,
+) -> PatchingResult:
+    """
+    Compute the direct causal effect of a component.
+
+    Patches only the specified component while keeping all other
+    components at their clean values, measuring the direct (not
+    indirect) effect of that component on the output.
+
+    Args:
+        model: The model to analyze
+        clean_input: Clean model input
+        corrupted_input: Corrupted model input
+        component_name: Name of the component to patch
+        metric_fn: Metric function for measuring effect
+        ablation_type: Type of ablation
+        device: Device to run on
+
+    Returns:
+        PatchingResult with the direct effect
+    """
+    experiment = ActivationPatchingExperiment(
+        model=model,
+        metric_fn=metric_fn,
+        ablation_type=ablation_type,
+        device=device,
+    )
+    return experiment.patch_single_component(
+        clean_input, corrupted_input, component_name
+    )
