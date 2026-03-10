@@ -1,295 +1,195 @@
 """
-CLRS-30 Dataset Loader using salsa-clrs (PyTorch implementation)
+CLRS-30 Dataset Loader using salsa-clrs (PyTorch/PyG implementation).
 
-This module provides a clean interface to load CLRS-30 algorithmic reasoning data
-for training and interpretability experiments.
+This module wraps the SALSACLRSDataset from the salsa-clrs package,
+providing utilities for loading CLRS-30 algorithmic reasoning data
+in PyTorch Geometric format.
+
+Data format:
+    Each sample is a PyG Data object (CLRSData) with:
+    - edge_index: (2, num_edges) graph structure
+    - Node-level fields: shape (num_nodes,) or (num_nodes, num_steps) for hints
+    - Edge-level fields: shape (num_edges,) or (num_edges, num_steps) for hints
+    - inputs/hints/outputs: lists of field names belonging to each stage
+    - length: number of algorithm steps
 """
 
+import os
+import warnings
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+
 import torch
-from torch.utils.data import Dataset, DataLoader
-from typing import Dict, List, Optional, Tuple, Any
-import numpy as np
-from dataclasses import dataclass
-from enum import Enum
+from torch.utils.data import DataLoader
+from torch_geometric.loader import DataLoader as PyGDataLoader
 
-# Import from salsa-clrs (PyTorch CLRS implementation)
-try:
-    from salsa_clrs import clrs
-    from salsa_clrs.clrs import specs
-    SALSA_AVAILABLE = True
-except ImportError:
-    SALSA_AVAILABLE = False
-    print("Warning: salsa-clrs not installed. Using mock data for development.")
+import salsaclrs
+from salsaclrs.data import SALSACLRSDataset, CLRSData
+from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
+from torch_geometric.data.storage import GlobalStorage
+
+# Whitelist salsaclrs/PyG classes so torch.load works with weights_only=True
+torch.serialization.add_safe_globals([CLRSData, DataEdgeAttr, DataTensorAttr, GlobalStorage])
 
 
-class Algorithm(Enum):
-    """CLRS-30 algorithm identifiers."""
-    # Sorting
-    INSERTION_SORT = "insertion_sort"
-    BUBBLE_SORT = "bubble_sort"
-    HEAPSORT = "heapsort"
-    QUICKSORT = "quicksort"
-    MERGE_SORT = "merge_sort"
-    
-    # Searching
-    BINARY_SEARCH = "binary_search"
-    LINEAR_SEARCH = "linear_search"
-    MINIMUM = "minimum"
-    MAXIMUM = "maximum"
-    QUICKSELECT = "quickselect"
-    
-    # Graphs - Traversal
-    BFS = "bfs"
-    DFS = "dfs"
-    TOPOLOGICAL_SORT = "topological_sort"
-    ARTICULATION_POINTS = "articulation_points"
-    BRIDGES = "bridges"
-    STRONGLY_CONNECTED = "strongly_connected_components"
-    
-    # Graphs - Shortest Paths
-    DIJKSTRA = "dijkstra"
-    BELLMAN_FORD = "bellman_ford"
-    FLOYD_WARSHALL = "floyd_warshall"
-    DAG_SHORTEST_PATHS = "dag_shortest_paths"
-    
-    # Graphs - MST
-    MST_PRIM = "mst_prim"
-    MST_KRUSKAL = "mst_kruskal"
-    
-    # Dynamic Programming
-    LCS_LENGTH = "lcs_length"
-    OPTIMAL_BST = "optimal_bst"
-    ACTIVITY_SELECTOR = "activity_selector"
-    MATRIX_CHAIN_ORDER = "matrix_chain_order"
-    TASK_SCHEDULING = "task_scheduling"
-    
-    # Strings
-    KMP = "naive_string_matcher"
-    
-    # Geometry
-    SEGMENTS_INTERSECT = "segments_intersect"
-    GRAHAM_SCAN = "graham_scan"
-    JARVIS_MARCH = "jarvis_march"
+# Algorithms available in salsa-clrs
+AVAILABLE_ALGORITHMS = ['bfs', 'dfs', 'dijkstra', 'mst_prim', 'fast_mis', 'eccentricity']
+
+
+@dataclass
+class AlgorithmSpec:
+    """Specification for a CLRS algorithm's data fields."""
+    input_fields: List[str]
+    hint_fields: List[str]
+    output_fields: List[str]
+    specs: Dict[str, tuple] = field(default_factory=dict)
+
+
+def get_clrs_dataset(
+    algorithm: str,
+    split: str = "train",
+    num_samples: int = 1000,
+    num_nodes: int = 16,
+    edge_probability: float = 0.2,
+    data_dir: Optional[str] = None,
+    seed: int = 42,
+) -> SALSACLRSDataset:
+    """
+    Load a CLRS-30 dataset using salsa-clrs.
+
+    Args:
+        algorithm: Algorithm name (one of AVAILABLE_ALGORITHMS).
+        split: Data split ("train", "val", "test").
+        num_samples: Number of problem instances to generate.
+        num_nodes: Number of nodes per graph.
+        edge_probability: Edge probability for Erdos-Renyi graph generator.
+        data_dir: Root directory for cached data. Defaults to ./clrs_data.
+        seed: Random seed for data generation.
+
+    Returns:
+        SALSACLRSDataset (a PyG InMemoryDataset).
+    """
+    if algorithm not in AVAILABLE_ALGORITHMS:
+        raise ValueError(
+            f"Unknown algorithm '{algorithm}'. "
+            f"Available: {AVAILABLE_ALGORITHMS}"
+        )
+
+    if data_dir is None:
+        data_dir = os.path.join(os.getcwd(), "clrs_data")
+
+    dataset = SALSACLRSDataset(
+        root=data_dir,
+        split=split,
+        algorithm=algorithm,
+        num_samples=num_samples,
+        seed=seed,
+        graph_generator="er",
+        graph_generator_kwargs={"n": num_nodes, "p": edge_probability},
+    )
+
+    return dataset
 
 
 @dataclass
 class CLRSBatch:
-    """Batch of CLRS algorithmic reasoning data."""
-    # Inputs
-    inputs: Dict[str, torch.Tensor]
-    # Hints (intermediate algorithm states)
-    hints: Dict[str, torch.Tensor]
-    # Outputs (final algorithm results)
-    outputs: Dict[str, torch.Tensor]
-    # Lengths of sequences (for masking)
-    lengths: torch.Tensor
-    # Algorithm identifier
-    algorithm: str
-    # Problem metadata
-    metadata: Dict[str, Any]
-    
+    """A batched collection of CLRS graph data with padded hints."""
+    edge_index: torch.Tensor       # (2, total_edges) concatenated edge indices
+    batch: torch.Tensor            # (total_nodes,) graph assignment for each node
+    num_graphs: int
+    lengths: torch.Tensor          # (batch_size,) algorithm steps per graph
+    node_data: Dict[str, torch.Tensor]   # field_name -> (total_nodes,) or (total_nodes, max_steps)
+    edge_data: Dict[str, torch.Tensor]   # field_name -> (total_edges,) or (total_edges, max_steps)
+    input_fields: List[str]
+    hint_fields: List[str]
+    output_fields: List[str]
+    specs: Dict[str, tuple] = field(default_factory=dict)
+
     def to(self, device: torch.device) -> 'CLRSBatch':
-        """Move batch to device."""
         return CLRSBatch(
-            inputs={k: v.to(device) for k, v in self.inputs.items()},
-            hints={k: v.to(device) for k, v in self.hints.items()},
-            outputs={k: v.to(device) for k, v in self.outputs.items()},
+            edge_index=self.edge_index.to(device),
+            batch=self.batch.to(device),
+            num_graphs=self.num_graphs,
             lengths=self.lengths.to(device),
-            algorithm=self.algorithm,
-            metadata=self.metadata
+            node_data={k: v.to(device) for k, v in self.node_data.items()},
+            edge_data={k: v.to(device) for k, v in self.edge_data.items()},
+            input_fields=self.input_fields,
+            hint_fields=self.hint_fields,
+            output_fields=self.output_fields,
+            specs=self.specs,
         )
 
 
-class CLRSDataset(Dataset):
-    """PyTorch Dataset wrapper for CLRS-30 data."""
-    
-    def __init__(
-        self,
-        algorithm: str,
-        split: str = "train",
-        num_samples: int = 1000,
-        lengths: List[int] = [16],
-        seed: int = 42,
-    ):
-        """
-        Initialize CLRS dataset.
-        
-        Args:
-            algorithm: Algorithm name (e.g., "bfs", "dijkstra")
-            split: Data split ("train", "val", "test")
-            num_samples: Number of samples to generate
-            lengths: Problem sizes to sample from
-            seed: Random seed for reproducibility
-        """
-        self.algorithm = algorithm
-        self.split = split
-        self.num_samples = num_samples
-        self.lengths = lengths
-        self.seed = seed
-        
-        # Load or generate data
-        self.data = self._load_data()
-        
-    def _load_data(self) -> List[Dict]:
-        """Load CLRS data using salsa-clrs or generate mock data."""
-        if SALSA_AVAILABLE:
-            return self._load_salsa_data()
-        else:
-            return self._generate_mock_data()
-    
-    def _load_salsa_data(self) -> List[Dict]:
-        """Load data from salsa-clrs."""
-        np.random.seed(self.seed)
-        
-        # Get algorithm sampler from CLRS
-        sampler, spec = clrs.build_sampler(
-            self.algorithm,
-            seed=self.seed,
-            num_samples=self.num_samples,
-            length=self.lengths[0] if len(self.lengths) == 1 else max(self.lengths),
-        )
-        
-        data = []
-        for _ in range(self.num_samples):
-            # Sample a problem instance
-            feedback = sampler.next(batch_size=1)
-            
-            # Convert to PyTorch tensors
-            sample = {
-                'inputs': {k: torch.tensor(v.data) for k, v in feedback.features.inputs.items()},
-                'hints': {k: torch.tensor(v.data) for k, v in feedback.features.hints.items()},
-                'outputs': {k: torch.tensor(v.data) for k, v in feedback.outputs.items()},
-                'length': self.lengths[np.random.randint(len(self.lengths))],
-            }
-            data.append(sample)
-        
-        return data
-    
-    def _generate_mock_data(self) -> List[Dict]:
-        """Generate mock data for development when salsa-clrs is not available."""
-        np.random.seed(self.seed)
-        data = []
-        
-        for i in range(self.num_samples):
-            length = self.lengths[i % len(self.lengths)]
-            
-            # Generate mock graph data (common to many algorithms)
-            num_nodes = length
-            num_edges = min(length * 2, length * (length - 1))
-            
-            # Node features
-            node_features = torch.randn(num_nodes, 8)
-            
-            # Adjacency matrix (sparse)
-            adj = torch.zeros(num_nodes, num_nodes)
-            edges = torch.randperm(num_nodes * num_nodes)[:num_edges]
-            for e in edges:
-                i_idx, j_idx = e // num_nodes, e % num_nodes
-                if i_idx != j_idx:
-                    adj[i_idx, j_idx] = 1
-            
-            # Edge weights
-            edge_weights = torch.rand(num_nodes, num_nodes) * adj
-            
-            # Source node (for graph traversal algorithms)
-            source = torch.zeros(num_nodes)
-            source[0] = 1
-            
-            # Mock hints (intermediate states)
-            num_steps = length
-            reach_hints = torch.zeros(num_steps, num_nodes)
-            for t in range(num_steps):
-                reach_hints[t, :min(t+1, num_nodes)] = 1
-            
-            # Mock output (e.g., reachability or distances)
-            output = torch.randint(0, 2, (num_nodes,)).float()
-            
-            sample = {
-                'inputs': {
-                    'node_features': node_features,
-                    'adjacency': adj,
-                    'edge_weights': edge_weights,
-                    'source': source,
-                },
-                'hints': {
-                    'reach': reach_hints,
-                    'predecessor': torch.randint(0, num_nodes, (num_steps, num_nodes)),
-                },
-                'outputs': {
-                    'reach': output,
-                    'distances': torch.rand(num_nodes) * length,
-                },
-                'length': length,
-            }
-            data.append(sample)
-        
-        return data
-    
-    def __len__(self) -> int:
-        return len(self.data)
-    
-    def __getitem__(self, idx: int) -> Dict:
-        return self.data[idx]
+def _collate_clrs_batch(data_list) -> CLRSBatch:
+    """Collate CLRSData objects into a batch, padding hints to max time steps."""
+    if len(data_list) == 0:
+        raise ValueError("Empty batch")
 
+    # Determine max time steps across the batch
+    max_steps = max(d.length.item() for d in data_list)
 
-def collate_clrs_batch(
-    batch: List[Dict],
-    algorithm: str
-) -> CLRSBatch:
-    """
-    Collate function for CLRS data.
-    
-    Handles variable-length sequences and creates padded batches.
-    """
-    batch_size = len(batch)
-    max_length = max(b['length'] for b in batch)
-    
-    # Collect all keys
-    input_keys = batch[0]['inputs'].keys()
-    hint_keys = batch[0]['hints'].keys()
-    output_keys = batch[0]['outputs'].keys()
-    
-    # Initialize padded tensors
-    inputs = {}
-    hints = {}
-    outputs = {}
-    
-    for key in input_keys:
-        shapes = [b['inputs'][key].shape for b in batch]
-        max_shape = tuple(max(s[i] for s in shapes) for i in range(len(shapes[0])))
-        padded = torch.zeros(batch_size, *max_shape)
-        for i, b in enumerate(batch):
-            slices = tuple(slice(0, s) for s in b['inputs'][key].shape)
-            padded[(i,) + slices] = b['inputs'][key]
-        inputs[key] = padded
-    
-    for key in hint_keys:
-        shapes = [b['hints'][key].shape for b in batch]
-        max_shape = tuple(max(s[i] for s in shapes) for i in range(len(shapes[0])))
-        padded = torch.zeros(batch_size, *max_shape)
-        for i, b in enumerate(batch):
-            slices = tuple(slice(0, s) for s in b['hints'][key].shape)
-            padded[(i,) + slices] = b['hints'][key]
-        hints[key] = padded
-    
-    for key in output_keys:
-        shapes = [b['outputs'][key].shape for b in batch]
-        max_shape = tuple(max(s[i] for s in shapes) for i in range(len(shapes[0])))
-        padded = torch.zeros(batch_size, *max_shape)
-        for i, b in enumerate(batch):
-            slices = tuple(slice(0, s) for s in b['outputs'][key].shape)
-            padded[(i,) + slices] = b['outputs'][key]
-        outputs[key] = padded
-    
-    lengths = torch.tensor([b['length'] for b in batch])
-    
+    # Gather field metadata from first item
+    first = data_list[0]
+    input_fields = list(first.inputs) if hasattr(first, 'inputs') else []
+    hint_fields = list(first.hints) if hasattr(first, 'hints') else []
+    output_fields = list(first.outputs) if hasattr(first, 'outputs') else []
+    all_fields = input_fields + hint_fields + output_fields
+
+    # Identify which fields are node-level vs edge-level
+    node_fields = {}
+    edge_fields = {}
+    for name in all_fields:
+        val = first[name]
+        if val.shape[0] == first.num_nodes:
+            node_fields[name] = val
+        elif val.shape[0] == first.num_edges:
+            edge_fields[name] = val
+
+    # Build batch by concatenating nodes/edges and padding time dims
+    edge_indices = []
+    batch_vec = []
+    lengths = []
+    node_data = {name: [] for name in node_fields}
+    edge_data = {name: [] for name in edge_fields}
+    node_offset = 0
+
+    for i, data in enumerate(data_list):
+        n = data.num_nodes
+        e = data.num_edges
+        steps = data.length.item()
+
+        # Offset edge indices
+        edge_indices.append(data.edge_index + node_offset)
+        batch_vec.append(torch.full((n,), i, dtype=torch.long))
+        lengths.append(steps)
+
+        for name in node_fields:
+            val = data[name]
+            if val.dim() == 2 and val.shape[1] < max_steps:
+                # Pad time dimension
+                pad = torch.zeros(n, max_steps - val.shape[1], dtype=val.dtype)
+                val = torch.cat([val, pad], dim=1)
+            node_data[name].append(val)
+
+        for name in edge_fields:
+            val = data[name]
+            if val.dim() == 2 and val.shape[1] < max_steps:
+                pad = torch.zeros(e, max_steps - val.shape[1], dtype=val.dtype)
+                val = torch.cat([val, pad], dim=1)
+            edge_data[name].append(val)
+
+        node_offset += n
+
     return CLRSBatch(
-        inputs=inputs,
-        hints=hints,
-        outputs=outputs,
-        lengths=lengths,
-        algorithm=algorithm,
-        metadata={'batch_size': batch_size, 'max_length': max_length}
+        edge_index=torch.cat(edge_indices, dim=1),
+        batch=torch.cat(batch_vec),
+        num_graphs=len(data_list),
+        lengths=torch.tensor(lengths, dtype=torch.long),
+        node_data={k: torch.cat(v, dim=0) for k, v in node_data.items()},
+        edge_data={k: torch.cat(v, dim=0) for k, v in edge_data.items()},
+        input_fields=input_fields,
+        hint_fields=hint_fields,
+        output_fields=output_fields,
     )
 
 
@@ -298,166 +198,358 @@ def get_clrs_dataloader(
     split: str = "train",
     batch_size: int = 32,
     num_samples: int = 1000,
-    lengths: List[int] = [16],
+    num_nodes: int = 16,
+    edge_probability: float = 0.2,
+    data_dir: Optional[str] = None,
     seed: int = 42,
     num_workers: int = 0,
     pin_memory: bool = False,
-) -> DataLoader:
+    shuffle: Optional[bool] = None,
+) -> PyGDataLoader:
     """
-    Create a DataLoader for CLRS-30 data.
-    
+    Create a PyG DataLoader for CLRS-30 data.
+
     Args:
-        algorithm: Algorithm name
-        split: Data split
-        batch_size: Batch size
-        num_samples: Number of samples
-        lengths: Problem sizes
-        seed: Random seed
-        num_workers: DataLoader workers
-        pin_memory: Pin memory for GPU
-        
+        algorithm: Algorithm name.
+        split: Data split.
+        batch_size: Batch size.
+        num_samples: Number of samples.
+        num_nodes: Number of nodes per graph.
+        edge_probability: Edge probability for ER graphs.
+        data_dir: Data cache directory.
+        seed: Random seed.
+        num_workers: DataLoader workers.
+        pin_memory: Pin memory for GPU transfer.
+        shuffle: Whether to shuffle. Defaults to True for train split.
+
     Returns:
-        DataLoader for CLRS data
+        PyG DataLoader yielding batched CLRSData objects.
     """
-    dataset = CLRSDataset(
+    dataset = get_clrs_dataset(
         algorithm=algorithm,
         split=split,
         num_samples=num_samples,
-        lengths=lengths,
+        num_nodes=num_nodes,
+        edge_probability=edge_probability,
+        data_dir=data_dir,
         seed=seed,
     )
-    
+
+    if shuffle is None:
+        shuffle = (split == "train")
+
+    # Hints have variable time steps across samples, so we need to pad them.
+    # Use a standard DataLoader with a custom collate that pads the time dimension.
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=(split == "train"),
+        shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        collate_fn=lambda b: collate_clrs_batch(b, algorithm),
+        collate_fn=_collate_clrs_batch,
     )
 
 
-def get_algorithm_spec(algorithm: str) -> Dict:
+def get_algorithm_spec(algorithm: str, dataset: Optional[SALSACLRSDataset] = None) -> AlgorithmSpec:
     """
-    Get specification for an algorithm including input/output types.
-    
-    Returns dict with:
-        - input_types: Dict mapping input name to type
-        - hint_types: Dict mapping hint name to type
-        - output_types: Dict mapping output name to type
-        - category: Algorithm category (e.g., "graphs", "sorting")
+    Get the specification for an algorithm's data fields.
+
+    If a dataset is provided, reads specs directly from it.
+    Otherwise returns specs from a hardcoded table.
+
+    Args:
+        algorithm: Algorithm name.
+        dataset: Optional dataset to read specs from.
+
+    Returns:
+        AlgorithmSpec with input/hint/output field names and type info.
     """
-    # Algorithm specifications based on CLRS-30
-    ALGORITHM_SPECS = {
+    if dataset is not None and hasattr(dataset, 'specs'):
+        specs = dataset.specs
+        inputs = [k for k, v in specs.items() if v[0] == 'input']
+        hints = [k for k, v in specs.items() if v[0] == 'hint']
+        outputs = [k for k, v in specs.items() if v[0] == 'output']
+        return AlgorithmSpec(
+            input_fields=inputs,
+            hint_fields=hints,
+            output_fields=outputs,
+            specs=specs,
+        )
+
+    # Hardcoded specs for common algorithms (stage, location, type, dim)
+    SPECS = {
         "bfs": {
-            "input_types": {
-                "adjacency": "graph",
-                "source": "node_pointer",
-            },
-            "hint_types": {
-                "reach": "node_mask",
-                "predecessor": "node_pointer",
-            },
-            "output_types": {
-                "reach": "node_mask",
-                "predecessor": "node_pointer",
-            },
-            "category": "graphs",
+            'pos': ('input', 'node', 'scalar', None),
+            's': ('input', 'node', 'mask_one', None),
+            'pi': ('output', 'node', 'pointer', None),
+            'reach_h': ('hint', 'node', 'mask', None),
+            'pi_h': ('hint', 'node', 'pointer', None),
         },
         "dfs": {
-            "input_types": {
-                "adjacency": "graph",
-                "source": "node_pointer",
-            },
-            "hint_types": {
-                "color": "node_categorical",
-                "predecessor": "node_pointer",
-                "time": "node_scalar",
-            },
-            "output_types": {
-                "predecessor": "node_pointer",
-                "discovery_time": "node_scalar",
-                "finish_time": "node_scalar",
-            },
-            "category": "graphs",
+            'pos': ('input', 'node', 'scalar', None),
+            's': ('input', 'node', 'mask_one', None),
+            'pi': ('output', 'node', 'pointer', None),
+            'color': ('hint', 'node', 'categorical', None),
+            'pi_h': ('hint', 'node', 'pointer', None),
+            'topo_h': ('hint', 'node', 'mask', None),
         },
         "dijkstra": {
-            "input_types": {
-                "adjacency": "graph",
-                "edge_weights": "edge_scalar",
-                "source": "node_pointer",
-            },
-            "hint_types": {
-                "in_queue": "node_mask",
-                "distance": "node_scalar",
-                "predecessor": "node_pointer",
-            },
-            "output_types": {
-                "distance": "node_scalar",
-                "predecessor": "node_pointer",
-            },
-            "category": "graphs",
+            'pos': ('input', 'node', 'scalar', None),
+            's': ('input', 'node', 'mask_one', None),
+            'pi': ('output', 'node', 'pointer', None),
+            'pi_h': ('hint', 'node', 'pointer', None),
+            'd': ('hint', 'node', 'scalar', None),
+            'mark': ('hint', 'node', 'mask', None),
+            'in_queue': ('hint', 'node', 'mask', None),
+            'u': ('hint', 'node', 'mask_one', None),
         },
-        "bellman_ford": {
-            "input_types": {
-                "adjacency": "graph",
-                "edge_weights": "edge_scalar",
-                "source": "node_pointer",
-            },
-            "hint_types": {
-                "distance": "node_scalar",
-                "predecessor": "node_pointer",
-            },
-            "output_types": {
-                "distance": "node_scalar",
-                "predecessor": "node_pointer",
-            },
-            "category": "graphs",
-        },
-        "insertion_sort": {
-            "input_types": {
-                "array": "array_scalar",
-            },
-            "hint_types": {
-                "key": "scalar",
-                "sorted_prefix": "array_mask",
-            },
-            "output_types": {
-                "sorted_array": "array_scalar",
-            },
-            "category": "sorting",
-        },
-        "bubble_sort": {
-            "input_types": {
-                "array": "array_scalar",
-            },
-            "hint_types": {
-                "swapped": "scalar",
-                "current_array": "array_scalar",
-            },
-            "output_types": {
-                "sorted_array": "array_scalar",
-            },
-            "category": "sorting",
-        },
-        "heapsort": {
-            "input_types": {
-                "array": "array_scalar",
-            },
-            "hint_types": {
-                "heap": "array_scalar",
-                "heap_size": "scalar",
-            },
-            "output_types": {
-                "sorted_array": "array_scalar",
-            },
-            "category": "sorting",
+        "mst_prim": {
+            'pos': ('input', 'node', 'scalar', None),
+            's': ('input', 'node', 'mask_one', None),
+            'pi': ('output', 'node', 'pointer', None),
+            'pi_h': ('hint', 'node', 'pointer', None),
+            'key': ('hint', 'node', 'scalar', None),
+            'mark': ('hint', 'node', 'mask', None),
+            'in_queue': ('hint', 'node', 'mask', None),
+            'u': ('hint', 'node', 'mask_one', None),
         },
     }
-    
-    return ALGORITHM_SPECS.get(algorithm, {
-        "input_types": {},
-        "hint_types": {},
-        "output_types": {},
-        "category": "unknown",
-    })
+
+    algo_specs = SPECS.get(algorithm, {})
+    inputs = [k for k, v in algo_specs.items() if v[0] == 'input']
+    hints = [k for k, v in algo_specs.items() if v[0] == 'hint']
+    outputs = [k for k, v in algo_specs.items() if v[0] == 'output']
+    return AlgorithmSpec(
+        input_fields=inputs,
+        hint_fields=hints,
+        output_fields=outputs,
+        specs=algo_specs,
+    )
+
+
+def spec_to_model_types(spec: AlgorithmSpec) -> tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Convert an AlgorithmSpec to output_types and hint_types dicts
+    in the format the NAR model expects.
+
+    Maps salsaclrs type names to model type names:
+        pointer -> node_pointer, mask -> node_mask, mask_one -> node_mask,
+        scalar -> node_scalar, categorical -> node_categorical
+
+    Returns:
+        (output_types, hint_types) dicts mapping field_name -> model_type_str.
+    """
+    TYPE_MAP = {
+        ('node', 'pointer'): 'node_pointer',
+        ('node', 'mask'): 'node_mask',
+        ('node', 'mask_one'): 'node_mask',
+        ('node', 'scalar'): 'node_scalar',
+        ('node', 'categorical'): 'node_categorical',
+        ('edge', 'pointer'): 'edge_pointer',
+        ('edge', 'mask'): 'edge_mask',
+        ('edge', 'scalar'): 'edge_scalar',
+    }
+
+    output_types = {}
+    hint_types = {}
+
+    for name, (stage, location, dtype, _) in spec.specs.items():
+        model_type = TYPE_MAP.get((location, dtype), f"{location}_{dtype}")
+        if stage == 'output':
+            output_types[name] = model_type
+        elif stage == 'hint':
+            hint_types[name] = model_type
+
+    return output_types, hint_types
+
+
+def batch_to_model_inputs(
+    batch: 'CLRSBatch',
+    spec: AlgorithmSpec,
+    device: Optional[torch.device] = None,
+) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """
+    Convert a CLRSBatch to the dense format the NAR model expects.
+
+    Returns:
+        (inputs, outputs, hints) — each a dict of tensors shaped
+        (batch_size, num_nodes, ...) for node-level data.
+
+    For pointer fields stored on edges, converts to dense
+    (batch_size, num_nodes) integer index tensors.
+    """
+    if device is None:
+        device = batch.edge_index.device
+
+    edge_index = batch.edge_index.to(device)
+    batch_vec = batch.batch.to(device)
+    num_graphs = batch.num_graphs
+    nodes_per_graph = torch.bincount(batch_vec)
+    max_nodes = nodes_per_graph.max().item()
+
+    # --- Build adjacency matrices ---
+    adj = torch.zeros(num_graphs, max_nodes, max_nodes, device=device)
+    node_offsets = torch.zeros(num_graphs + 1, dtype=torch.long, device=device)
+    node_offsets[1:] = nodes_per_graph.cumsum(0)
+
+    for g in range(num_graphs):
+        mask = batch_vec[edge_index[0]] == g
+        src = edge_index[0, mask] - node_offsets[g]
+        tgt = edge_index[1, mask] - node_offsets[g]
+        adj[g, src, tgt] = 1.0
+
+    # --- Helper: pad concatenated node data to (batch, max_nodes, ...) ---
+    def _pad_node_field(flat_tensor):
+        extra_dims = flat_tensor.shape[1:] if flat_tensor.dim() > 1 else ()
+        padded = torch.zeros(num_graphs, max_nodes, *extra_dims,
+                             dtype=flat_tensor.dtype, device=device)
+        for g in range(num_graphs):
+            n = nodes_per_graph[g].item()
+            start = node_offsets[g].item()
+            padded[g, :n] = flat_tensor[start:start + n]
+        return padded
+
+    # --- Helper: decode edge-level pointer to node-level index tensor ---
+    def _decode_edge_pointer(edge_vals, step_dim=False):
+        """Convert edge-stored pointer to (batch, max_nodes) or (batch, max_nodes, steps) indices."""
+        if step_dim and edge_vals.dim() == 2:
+            # edge_vals: (total_edges, steps)
+            num_steps = edge_vals.shape[1]
+            result = torch.zeros(num_graphs, max_nodes, num_steps,
+                                 dtype=torch.long, device=device)
+            for g in range(num_graphs):
+                n = nodes_per_graph[g].item()
+                mask = batch_vec[edge_index[0]] == g
+                src = edge_index[0, mask] - node_offsets[g]
+                tgt = edge_index[1, mask] - node_offsets[g]
+                ev = edge_vals[mask].to(device)  # (edges_in_g, steps)
+                for t in range(num_steps):
+                    for node in range(n):
+                        node_mask = src == node
+                        if node_mask.any():
+                            result[g, node, t] = tgt[node_mask][ev[node_mask, t].argmax()]
+            return result
+        else:
+            result = torch.zeros(num_graphs, max_nodes, dtype=torch.long, device=device)
+            for g in range(num_graphs):
+                n = nodes_per_graph[g].item()
+                mask = batch_vec[edge_index[0]] == g
+                src = edge_index[0, mask] - node_offsets[g]
+                tgt = edge_index[1, mask] - node_offsets[g]
+                ev = edge_vals[mask].to(device)
+                for node in range(n):
+                    node_mask = src == node
+                    if node_mask.any():
+                        result[g, node] = tgt[node_mask][ev[node_mask].argmax()]
+            return result
+
+    # --- Build inputs dict ---
+    inputs = {'adjacency': adj}
+
+    # Concatenate node-level input features
+    node_feat_list = []
+    for name in batch.input_fields:
+        if name in batch.node_data:
+            val = batch.node_data[name].to(device)
+            if val.dim() == 1:
+                val = val.unsqueeze(-1)
+            node_feat_list.append(_pad_node_field(val))
+
+    if node_feat_list:
+        inputs['node_features'] = torch.cat(node_feat_list, dim=-1)
+    else:
+        inputs['node_features'] = torch.zeros(num_graphs, max_nodes, 1, device=device)
+
+    # Edge weights if present
+    if 'weights' in batch.edge_data:
+        weight_matrix = torch.zeros(num_graphs, max_nodes, max_nodes, device=device)
+        weights = batch.edge_data['weights'].to(device)
+        for g in range(num_graphs):
+            mask = batch_vec[edge_index[0]] == g
+            src = edge_index[0, mask] - node_offsets[g]
+            tgt = edge_index[1, mask] - node_offsets[g]
+            weight_matrix[g, src, tgt] = weights[mask].float()
+        inputs['edge_weights'] = weight_matrix
+
+    # --- Build outputs dict ---
+    outputs = {}
+    for name in batch.output_fields:
+        field_spec = spec.specs.get(name, ('output', 'node', 'scalar', None))
+        _, location, dtype, _ = field_spec
+
+        if name in batch.node_data:
+            outputs[name] = _pad_node_field(batch.node_data[name].to(device))
+        elif name in batch.edge_data:
+            if dtype == 'pointer':
+                outputs[name] = _decode_edge_pointer(batch.edge_data[name].to(device))
+            else:
+                # Edge-level non-pointer outputs — store as edge attribute
+                outputs[name] = batch.edge_data[name].to(device)
+
+    # --- Build hints dict (padded to max_steps) ---
+    hints = {}
+    for name in batch.hint_fields:
+        field_spec = spec.specs.get(name, ('hint', 'node', 'scalar', None))
+        _, location, dtype, _ = field_spec
+
+        if name in batch.node_data:
+            # Node hint: (total_nodes, max_steps) -> (batch, max_nodes, max_steps)
+            hints[name] = _pad_node_field(batch.node_data[name].to(device))
+        elif name in batch.edge_data:
+            if dtype == 'pointer':
+                hints[name] = _decode_edge_pointer(
+                    batch.edge_data[name].to(device), step_dim=True
+                )
+            else:
+                hints[name] = batch.edge_data[name].to(device)
+
+    return inputs, outputs, hints
+
+
+def pyg_to_dense(data, num_nodes: Optional[int] = None) -> Dict[str, torch.Tensor]:
+    """
+    Convert a PyG Data object to dense tensor format.
+
+    Useful for models that expect adjacency matrices rather than edge_index.
+
+    Args:
+        data: PyG Data object from salsaclrs.
+        num_nodes: Number of nodes. Inferred from data if not provided.
+
+    Returns:
+        Dict with 'adjacency' (num_nodes, num_nodes), 'node_features' (num_nodes, d),
+        plus any other node-level fields.
+    """
+    if num_nodes is None:
+        num_nodes = data.num_nodes
+
+    # Build adjacency matrix from edge_index
+    edge_index = data.edge_index
+    adj = torch.zeros(num_nodes, num_nodes)
+    adj[edge_index[0], edge_index[1]] = 1.0
+
+    # Collect node-level input fields
+    input_names = data.inputs if hasattr(data, 'inputs') else []
+    node_features = []
+    for name in input_names:
+        val = data[name]
+        if val.dim() == 1 and val.shape[0] == num_nodes:
+            node_features.append(val.unsqueeze(-1))
+
+    if node_features:
+        node_feat = torch.cat(node_features, dim=-1)
+    else:
+        node_feat = torch.zeros(num_nodes, 1)
+
+    result = {
+        'adjacency': adj,
+        'node_features': node_feat,
+    }
+
+    # Include edge weights if present
+    if hasattr(data, 'weights'):
+        weight_matrix = torch.zeros(num_nodes, num_nodes)
+        weight_matrix[edge_index[0], edge_index[1]] = data.weights.float()
+        result['edge_weights'] = weight_matrix
+
+    return result
