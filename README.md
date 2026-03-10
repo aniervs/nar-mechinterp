@@ -12,12 +12,26 @@ This codebase provides tools to:
 
 ## Installation
 
+This project uses [uv](https://docs.astral.sh/uv/) for package management.
+
 ```bash
-pip install -r requirements.txt
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install all dependencies
+uv sync
+```
+
+To run scripts and tests, use `uv run`:
+
+```bash
+uv run python experiments/train_nar.py --algorithm bfs
+uv run python experiments/run_acdc.py --checkpoint checkpoints/bfs/best.pt --algorithm bfs
+uv run python -m pytest
 ```
 
 ### Requirements
-- Python 3.8+
+- Python 3.13+
 - PyTorch 2.0+
 - NetworkX (for circuit visualization)
 - Matplotlib, Plotly (visualization)
