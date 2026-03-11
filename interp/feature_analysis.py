@@ -13,10 +13,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-
-from interp.sae import SparseAutoencoder
 
 
 @dataclass
@@ -47,7 +46,12 @@ class FeatureAnalyzer:
     computes how well each feature correlates with algorithmic concepts.
     """
 
-    def __init__(self, sae: SparseAutoencoder):
+    def __init__(self, sae: nn.Module):
+        """
+        Args:
+            sae: Any SAE variant (SparseAutoencoder, BatchTopKSAE, or Transcoder).
+                Must have an `encode(x)` method and a `dict_size` attribute.
+        """
         self.sae = sae
         self.sae.eval()
 

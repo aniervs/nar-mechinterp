@@ -21,8 +21,6 @@ from typing import Dict, List, Optional, Any
 
 import torch
 from torch.utils.data import DataLoader
-from torch_geometric.loader import DataLoader as PyGDataLoader
-
 import salsaclrs
 from salsaclrs.data import SALSACLRSDataset, CLRSData
 from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
@@ -205,9 +203,9 @@ def get_clrs_dataloader(
     num_workers: int = 0,
     pin_memory: bool = False,
     shuffle: Optional[bool] = None,
-) -> PyGDataLoader:
+) -> DataLoader:
     """
-    Create a PyG DataLoader for CLRS-30 data.
+    Create a DataLoader for CLRS-30 data with custom collation.
 
     Args:
         algorithm: Algorithm name.

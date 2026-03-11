@@ -25,7 +25,14 @@ from .metrics import (
     kl_divergence,
     edge_importance_score,
 )
-from .sae import SparseAutoencoder, SAEOutput, SAETrainer
+from .sae import (
+    SparseAutoencoder,
+    BatchTopKSAE,
+    Transcoder,
+    SAEOutput,
+    TranscoderOutput,
+    SAETrainer,
+)
 from .activation_collector import ActivationCollector, make_activation_dataloader
 from .feature_analysis import FeatureAnalyzer, FeatureAnalysisResult, FeatureStats
 from .concept_labels import ConceptLabels, extract_concept_labels, collect_concept_labels
@@ -57,9 +64,12 @@ __all__ = [
     "CircuitEvaluator",
     "kl_divergence",
     "edge_importance_score",
-    # SAE
+    # SAE variants
     "SparseAutoencoder",
+    "BatchTopKSAE",
+    "Transcoder",
     "SAEOutput",
+    "TranscoderOutput",
     "SAETrainer",
     # Activation collector
     "ActivationCollector",

@@ -13,7 +13,7 @@ import json
 
 import torch
 
-from data import get_clrs_dataloader, get_algorithm_spec
+from data import get_clrs_dataloader, get_clrs_dataset, get_algorithm_spec, spec_to_model_types
 from models import NARModel
 from interp import ACDC, ACDCConfig
 from utils import plot_circuit_graph, plot_edge_importance, save_circuit_to_json
@@ -39,7 +39,7 @@ def parse_args():
 
 def load_model(checkpoint_path: str, device: torch.device) -> NARModel:
     """Load trained NAR model."""
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     args = checkpoint.get('args', {})
     
     model = NARModel(
@@ -69,16 +69,21 @@ def main():
     # Load model
     model = load_model(args.checkpoint, device)
     
-    # Get algorithm spec
-    spec = get_algorithm_spec(args.algorithm)
-    output_types = spec.get('output_types', {'reach': 'node_mask'})
+    # Get algorithm spec and derive output types
+    ds = get_clrs_dataset(args.algorithm, split="train", num_samples=args.data_samples)
+    spec = get_algorithm_spec(args.algorithm, dataset=ds)
+    output_types, _ = spec_to_model_types(spec)
     
     print(f"\nAlgorithm: {args.algorithm}")
     print(f"Output types: {output_types}")
     
     # Create dataloader
     dataloader = get_clrs_dataloader(
-        args.algorithm, "train", args.batch_size, args.data_samples, [16], args.seed
+        args.algorithm,
+        split="train",
+        batch_size=args.batch_size,
+        num_samples=args.data_samples,
+        seed=args.seed,
     )
     
     # ACDC configuration

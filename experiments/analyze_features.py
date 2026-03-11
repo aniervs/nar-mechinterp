@@ -14,7 +14,7 @@ from pathlib import Path
 
 import torch
 
-from interp.sae import SparseAutoencoder
+from interp.sae import SparseAutoencoder, BatchTopKSAE, Transcoder
 from interp.feature_analysis import FeatureAnalyzer
 
 
@@ -34,12 +34,21 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load SAE
+    # Load SAE (dispatch on sae_type saved in checkpoint)
     print(f"Loading SAE from {args.sae_checkpoint}...")
     checkpoint = torch.load(args.sae_checkpoint, map_location=device, weights_only=True)
-    sae = SparseAutoencoder.from_config(checkpoint["config"]).to(device)
+    sae_type = checkpoint.get("sae_type", "standard")
+    SAE_CLASSES = {
+        "standard": SparseAutoencoder,
+        "batchtopk": BatchTopKSAE,
+        "transcoder": Transcoder,
+    }
+    sae_cls = SAE_CLASSES.get(sae_type, SparseAutoencoder)
+    sae = sae_cls.from_config(checkpoint["config"]).to(device)
     sae.load_state_dict(checkpoint["state_dict"])
     sae.eval()
+    is_transcoder = sae_type == "transcoder"
+    print(f"SAE type: {sae_type}")
 
     # Load activations
     print(f"Loading activations from {args.activations}...")
@@ -73,7 +82,13 @@ def main():
     # --- Concept correlation (if labels provided) ---
     if args.concept_labels:
         print(f"\n=== Concept Correlations ===")
-        concept_labels = torch.load(args.concept_labels, map_location=device, weights_only=True)
+        concept_data = torch.load(args.concept_labels, map_location=device, weights_only=True)
+        # train_sae.py saves {"labels": {...}, "descriptions": {...}, ...}
+        # Extract the actual label tensors
+        if "labels" in concept_data:
+            concept_labels = concept_data["labels"]
+        else:
+            concept_labels = concept_data
         print(f"Concepts: {list(concept_labels.keys())}")
 
         result = analyzer.compute_concept_correlations(activations, concept_labels)
@@ -99,11 +114,17 @@ def main():
     # --- Reconstruction quality ---
     print("\n=== Reconstruction Quality ===")
     with torch.no_grad():
-        output = sae(activations[:10000])
+        sample = activations[:10000]
+        if is_transcoder:
+            output = sae(sample, target=sample)
+            reconstructed = output.predicted_output
+        else:
+            output = sae(sample)
+            reconstructed = output.reconstructed
         print(f"Reconstruction MSE: {output.reconstruction_loss.item():.6f}")
         # Fraction of variance explained
-        total_var = activations[:10000].var(dim=0).sum()
-        residual_var = (activations[:10000] - output.reconstructed).var(dim=0).sum()
+        total_var = sample.var(dim=0).sum()
+        residual_var = (sample - reconstructed).var(dim=0).sum()
         fve = 1 - residual_var / total_var
         print(f"Fraction of variance explained: {fve.item():.4f}")
 
