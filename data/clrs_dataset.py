@@ -23,11 +23,17 @@ import torch
 from torch.utils.data import DataLoader
 import salsaclrs
 from salsaclrs.data import SALSACLRSDataset, CLRSData
-from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
 from torch_geometric.data.storage import GlobalStorage
 
 # Whitelist salsaclrs/PyG classes so torch.load works with weights_only=True
-torch.serialization.add_safe_globals([CLRSData, DataEdgeAttr, DataTensorAttr, GlobalStorage])
+# DataEdgeAttr/DataTensorAttr are dynamically generated in some PyG versions
+_safe_globals = [CLRSData, GlobalStorage]
+try:
+    from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
+    _safe_globals.extend([DataEdgeAttr, DataTensorAttr])
+except ImportError:
+    pass
+torch.serialization.add_safe_globals(_safe_globals)
 
 
 # Algorithms available in salsa-clrs
