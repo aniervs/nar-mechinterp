@@ -212,15 +212,14 @@ class Decoder(nn.Module):
                 predictions[name] = pred
                 
             elif out_type == 'node_pointer':
-                # Pointer prediction: softmax attention over nodes
+                # Pointer prediction: logits over nodes (no softmax — loss applies it)
                 query = self.pointer_query(node_features)  # (batch, num_nodes, hidden_dim)
                 key = self.pointer_key(node_features)  # (batch, num_nodes, hidden_dim)
-                
+
                 # Each node predicts which other node it points to
                 attn = torch.einsum('bnh,bmh->bnm', query, key)
                 attn = attn / (self.hidden_dim ** 0.5)
-                pred = F.softmax(attn, dim=-1)
-                predictions[name] = pred
+                predictions[name] = attn  # Return logits, not softmax
                 
             elif out_type in ['edge_mask', 'edge_scalar']:
                 # Edge-level prediction
@@ -352,21 +351,24 @@ class NARModel(nn.Module):
         # Encode inputs
         node_encodings, edge_encodings = self.encoder(inputs, num_nodes)
         
+        # Collect intermediate activations when we need hints or explicit request
+        need_intermediates = return_activations or (self.decode_hints and hints is not None and hint_types)
+
         # Process
         processed_nodes, processed_edges, activations = self.processor(
             node_encodings,
             edge_encodings,
             adjacency,
             num_steps=num_steps,
-            return_all_activations=return_activations,
+            return_all_activations=need_intermediates,
         )
-        
+
         # Decode outputs
         predictions = self.decoder(processed_nodes, processed_edges, output_types)
-        
+
         # Decode hints at each step (if enabled)
         hint_predictions = None
-        if self.decode_hints and return_activations and 'node_features' in activations:
+        if self.decode_hints and need_intermediates and 'node_features' in activations:
             hint_predictions = {name: [] for name in hint_types}
             for step_nodes in activations['node_features']:
                 step_preds = self.hint_decoder(
