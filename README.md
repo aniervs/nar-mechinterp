@@ -1,18 +1,18 @@
 # NAR Mechanistic Interpretability
 
-Mechanistic interpretability research on Neural Algorithmic Reasoning (NAR) models trained on the CLRS-30 benchmark, using Automatic Circuit Discovery (ACDC) techniques.
+Mechanistic interpretability of Neural Algorithmic Reasoning (NAR) models using Sparse Autoencoders (SAEs). We train NAR models on CLRS-30 algorithmic tasks, then use SAEs to extract interpretable features from processor activations and correlate them with ground-truth algorithmic concepts (e.g., "is this node visited?", "is this node on the BFS frontier?").
 
 ## Overview
 
-This codebase provides tools to:
-1. **Train** NAR models on algorithmic reasoning tasks from CLRS-30
-2. **Discover** minimal circuits using ACDC (Automatic Circuit Discovery)
-3. **Analyze** and compare circuits across different algorithms
-4. **Visualize** attention patterns, activations, and circuit structures
+1. **Train** an NAR model on a CLRS-30 algorithm (BFS, DFS, Dijkstra, etc.)
+2. **Collect** intermediate processor activations across all message-passing steps
+3. **Train a Sparse Autoencoder** (BatchTopK SAE) on these activations
+4. **Correlate** SAE features with algorithmic concept labels extracted from hints
+5. **Analyze** which features are monosemantic (cleanly map to one concept)
 
-## Installation
+## Quick Start
 
-This project uses [uv](https://docs.astral.sh/uv/) for package management.
+### Installation
 
 ```bash
 # Install uv if you don't have it
@@ -22,221 +22,86 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
-To run scripts and tests, use `uv run`:
+### Run Experiments
+
+The main experiment pipeline is in a single notebook:
 
 ```bash
-uv run python experiments/train_nar.py --algorithm bfs
-uv run python experiments/run_acdc.py --checkpoint checkpoints/bfs/best.pt --algorithm bfs
-uv run python -m pytest
+# Run locally
+uv run jupyter lab experiments/run_experiments.ipynb
 ```
 
-### Requirements
-- Python 3.13+
-- PyTorch 2.0+
-- NetworkX (for circuit visualization)
-- Matplotlib, Plotly (visualization)
-- salsa-clrs (CLRS-30 dataset) - optional, mock data available
+Or open directly in **Google Colab** — the notebook includes a setup cell that clones the repo and installs dependencies. It also mounts Google Drive for persistent checkpoints.
+
+Set `LOCAL_DEBUG = True` in the config cell for a quick sanity check on CPU (~2 min), or `False` for full-scale GPU training.
+
+### Run Tests
+
+```bash
+uv run python -m pytest
+```
 
 ## Project Structure
 
 ```
-nar_mechinterp/
-├── configs/
-│   └── default_config.yaml      # Training and experiment configuration
+nar-mechinterp/
 ├── data/
-│   └── clrs_dataset.py          # CLRS-30 dataset loader with mock fallback
+│   └── clrs_dataset.py            # CLRS-30 data loading via salsa-clrs
 ├── models/
-│   ├── nar_model.py             # Full NAR model (Encoder-Processor-Decoder)
-│   └── processor.py             # Message passing and transformer processors
+│   ├── nar_model.py               # NAR model (Encoder-Processor-Decoder)
+│   └── processor.py               # MPNN and Transformer processors
 ├── interp/
-│   ├── acdc.py                  # ACDC algorithm implementation
-│   ├── activation_patching.py  # Activation patching experiments
-│   ├── circuit.py               # Circuit data structures and analysis
-│   └── metrics.py               # Interpretability metrics
-├── utils/
-│   ├── hooks.py                 # PyTorch hook utilities for activation collection
-│   └── visualization.py         # Circuit and attention visualization
+│   ├── sae.py                     # SAE variants (Standard, BatchTopK, Transcoder)
+│   ├── activation_collector.py    # Collect processor activations per (node, step)
+│   ├── concept_labels.py          # Extract algorithmic concept labels from hints
+│   └── feature_analysis.py        # Feature-concept correlation analysis
 ├── experiments/
-│   ├── train_nar.py             # Training script
-│   ├── run_acdc.py              # Circuit discovery script
-│   └── analyze_circuits.py      # Circuit analysis and comparison
-└── requirements.txt
+│   └── run_experiments.ipynb       # End-to-end experiment notebook
+└── tests/                          # Unit and integration tests
 ```
 
-## Quick Start
+## Architecture
 
-### 1. Train a NAR Model
+### NAR Model
 
-```bash
-# Train on BFS algorithm
-python experiments/train_nar.py --algorithm bfs --epochs 100
+Encoder-Processor-Decoder architecture following Velickovic et al.:
 
-# Train on Dijkstra's algorithm with custom parameters
-python experiments/train_nar.py --algorithm dijkstra --hidden_dim 256 --num_layers 6
+- **Encoder**: Embeds node features, edge weights, and graph structure
+- **Processor**: Multi-step MPNN with attention and gating (configurable: MPNN or Transformer)
+- **Decoder**: Produces algorithm-specific outputs (pointers, masks, scalars)
+- **Hint supervision**: Intermediate processor steps are supervised with algorithmic hints
 
-# Available algorithms: bfs, dfs, dijkstra, bellman_ford, insertion_sort, 
-#                       bubble_sort, heapsort, quicksort, and more
-```
+### Sparse Autoencoders
 
-### 2. Run Circuit Discovery
+Three SAE variants for analyzing processor activations:
 
-```bash
-# Discover circuit for BFS
-python experiments/run_acdc.py \
-    --checkpoint checkpoints/bfs/best.pt \
-    --algorithm bfs \
-    --threshold 0.01 \
-    --save_plots
+- **SparseAutoencoder**: Standard L1-penalized SAE
+- **BatchTopKSAE** (recommended): Sparsity via global top-k selection across the batch — no activation shrinkage, direct sparsity control
+- **Transcoder**: Maps processor input to output through sparse features (for circuit analysis)
 
-# With different ablation strategy
-python experiments/run_acdc.py \
-    --checkpoint checkpoints/dijkstra/best.pt \
-    --algorithm dijkstra \
-    --ablation_type resample \
-    --threshold 0.005
-```
+### Concept Labels
 
-### 3. Analyze and Compare Circuits
+Ground-truth algorithmic concepts extracted from CLRS hints:
 
-```bash
-# Analyze individual circuits
-python experiments/analyze_circuits.py \
-    --circuits circuits/bfs_circuit.json circuits/dfs_circuit.json \
-    --compare \
-    --find_shared \
-    --save_plots
+| Algorithm | Concepts |
+|-----------|----------|
+| BFS | `is_source`, `is_visited`, `is_frontier` |
+| DFS | `is_source`, `is_visited`, `is_active`, `is_finished` |
+| Dijkstra | `is_source`, `is_settled`, `is_in_queue`, `is_current`, `distance_estimate` |
+| Prim's MST | `is_source`, `is_in_tree`, `is_in_queue`, `is_current`, `key_value` |
 
-# Analyze all circuits in a directory
-python experiments/analyze_circuits.py \
-    --circuit_dir circuits/ \
-    --compare \
-    --merge \
-    --output_dir analysis/
-```
+## Requirements
 
-## Model Architecture
-
-The NAR model follows the Encoder-Processor-Decoder architecture:
-
-### Encoder
-- Embeds various input types (scalars, node features, edges, pointers, graphs)
-- Separate embedding layers for each input type
-- Projects to hidden dimension
-
-### Processor
-- **MPNN (default)**: Message Passing Neural Network
-  - Node attention mechanism
-  - Edge update MLP
-  - Message aggregation
-  - Node update with gating
-- **Transformer**: Standard transformer with self-attention
-- Supports multi-step reasoning (hint supervision)
-
-### Decoder
-- Produces algorithm-specific outputs
-- Supports: node masks, pointers, scalars, edge predictions
-
-## ACDC Algorithm
-
-The ACDC (Automatic Circuit Discovery) implementation:
-
-1. **Build computational graph** from model structure
-2. **Score edges** using activation patching
-3. **Iteratively prune** low-importance edges
-4. **Verify fidelity** of resulting circuit
-
-### Ablation Types
-- `mean`: Replace activations with dataset mean
-- `zero`: Replace with zeros
-- `resample`: Replace with activations from different inputs
-
-### Metrics
-- `kl_divergence`: KL divergence between patched and clean outputs
-- `mse`: Mean squared error
-- `accuracy`: Task accuracy difference
-
-## Circuit Analysis
-
-### Comparing Circuits
-```python
-from interp import Circuit, compare_circuits
-
-bfs_circuit = Circuit.load("circuits/bfs_circuit.json")
-dfs_circuit = Circuit.load("circuits/dfs_circuit.json")
-
-comparison = compare_circuits(bfs_circuit, dfs_circuit, "BFS", "DFS")
-print(f"Similarity: {comparison['overall_similarity']:.4f}")
-```
-
-### Finding Shared Components
-```python
-from interp import find_shared_subcircuit
-
-circuits = [bfs_circuit, dfs_circuit, dijkstra_circuit]
-shared = find_shared_subcircuit(circuits)
-print(f"Shared nodes: {shared.num_nodes}")
-```
-
-## Visualization
-
-```python
-from utils import plot_circuit_graph, plot_attention_patterns
-
-# Visualize circuit
-plot_circuit_graph(
-    circuit.to_dict(),
-    title="BFS Circuit",
-    save_path="bfs_circuit.png"
-)
-
-# Visualize attention patterns
-plot_attention_patterns(
-    attention_weights,
-    layer_idx=2,
-    save_path="attention_layer2.png"
-)
-```
-
-## Configuration
-
-Edit `configs/default_config.yaml`:
-
-```yaml
-model:
-  hidden_dim: 128
-  num_layers: 4
-  num_heads: 8
-  processor_type: mpnn
-  use_gating: true
-
-training:
-  batch_size: 32
-  num_epochs: 100
-  learning_rate: 0.001
-  scheduler: cosine
-
-acdc:
-  threshold: 0.01
-  metric: kl_divergence
-  ablation_type: mean
-  max_iterations: 100
-```
-
-## Key Research Questions
-
-This codebase enables investigation of:
-
-1. **Circuit Specialization**: Do different algorithms use distinct circuits?
-2. **Shared Computation**: What components are shared across algorithms?
-3. **Algorithm Families**: Do similar algorithms (BFS/DFS, sorting variants) share circuits?
-4. **Generalization**: How do circuits change with problem size?
-5. **Emergent Structure**: Do circuits reflect algorithmic structure?
+- Python >= 3.11
+- PyTorch 2.0+
+- salsa-clrs (installed from git automatically)
 
 ## References
 
-- CLRS-30 Benchmark: [Deepmind CLRS](https://github.com/deepmind/clrs)
-- ACDC Paper: "Towards Automated Circuit Discovery for Mechanistic Interpretability" (Conmy et al., 2023)
-- NAR Survey: "Neural Algorithmic Reasoning" (Veličković, 2023)
+- CLRS-30 Benchmark: [Velickovic et al., 2022](https://arxiv.org/abs/2205.15659)
+- SALSA-CLRS: [Minder et al., 2024](https://github.com/jkminder/SALSA-CLRS)
+- BatchTopK SAEs: [Bussmann et al., 2024](https://arxiv.org/abs/2412.06410)
+- Neural Algorithmic Reasoning: [Velickovic, 2023](https://arxiv.org/abs/2105.02761)
 
 ## License
 
