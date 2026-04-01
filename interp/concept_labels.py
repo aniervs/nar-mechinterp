@@ -89,14 +89,22 @@ def extract_concept_labels(
     source = _extract_source(inputs, batch, max_nodes)
 
     # Extract algorithm-specific concepts
-    if algorithm == "bfs":
-        labels, descriptions = _extract_bfs_concepts(hints, source, max_steps)
-    elif algorithm == "dijkstra":
-        labels, descriptions = _extract_dijkstra_concepts(hints, source, max_steps)
-    elif algorithm == "dfs":
-        labels, descriptions = _extract_dfs_concepts(hints, source, max_steps)
-    elif algorithm == "mst_prim":
-        labels, descriptions = _extract_mst_prim_concepts(hints, source, max_steps)
+    _EXTRACTORS = {
+        "bfs": _extract_bfs_concepts,
+        "dijkstra": _extract_dijkstra_concepts,
+        "dfs": _extract_dfs_concepts,
+        "mst_prim": _extract_mst_prim_concepts,
+        "bellman_ford": _extract_bellman_ford_concepts,
+        "mst_kruskal": _extract_mst_kruskal_concepts,
+        "articulation_points": _extract_articulation_concepts,
+        "bridges": _extract_bridges_concepts,
+        "fast_mis": _extract_fast_mis_concepts,
+        "eccentricity": _extract_eccentricity_concepts,
+    }
+
+    extractor = _EXTRACTORS.get(algorithm)
+    if extractor is not None:
+        labels, descriptions = extractor(hints, source, max_steps)
     else:
         # Generic: just flatten whatever hints are available
         labels, descriptions = _extract_generic_concepts(hints, max_steps)
@@ -284,6 +292,180 @@ def _extract_mst_prim_concepts(
     if 'key' in hints:
         labels['key_value'] = hints['key']
         descriptions['key_value'] = 'Current minimum edge weight connecting node to MST'
+
+    return labels, descriptions
+
+
+def _extract_bellman_ford_concepts(
+    hints: dict, source: torch.Tensor, max_steps: int
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Extract Bellman-Ford shortest-path concepts from hints."""
+    labels = {}
+    descriptions = {}
+
+    labels['is_source'] = source
+    descriptions['is_source'] = 'Source node of Bellman-Ford'
+
+    if 'msk' in hints:
+        labels['is_relaxed'] = hints['msk']
+        descriptions['is_relaxed'] = 'Node has been relaxed (distance updated)'
+
+    if 'd' in hints:
+        labels['distance_estimate'] = hints['d']
+        descriptions['distance_estimate'] = 'Current shortest distance estimate'
+
+    # Derived: just_relaxed = relaxed at t but not at t-1
+    if 'msk' in hints and hints['msk'].dim() == 3 and hints['msk'].shape[2] > 1:
+        msk = hints['msk']
+        just_relaxed = torch.zeros_like(msk)
+        just_relaxed[:, :, 0] = msk[:, :, 0]
+        just_relaxed[:, :, 1:] = msk[:, :, 1:] * (1 - msk[:, :, :-1])
+        labels['just_relaxed'] = just_relaxed
+        descriptions['just_relaxed'] = 'Node was just relaxed this step'
+
+    return labels, descriptions
+
+
+def _extract_mst_kruskal_concepts(
+    hints: dict, source: torch.Tensor, max_steps: int
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Extract Kruskal MST concepts from hints."""
+    labels = {}
+    descriptions = {}
+
+    if 'mask_u' in hints:
+        labels['in_component_u'] = hints['mask_u']
+        descriptions['in_component_u'] = 'Node belongs to the component of endpoint u'
+
+    if 'mask_v' in hints:
+        labels['in_component_v'] = hints['mask_v']
+        descriptions['in_component_v'] = 'Node belongs to the component of endpoint v'
+
+    if 'u' in hints:
+        labels['is_u'] = hints['u']
+        descriptions['is_u'] = 'Node is the u-endpoint of the current edge'
+
+    if 'v' in hints:
+        labels['is_v'] = hints['v']
+        descriptions['is_v'] = 'Node is the v-endpoint of the current edge'
+
+    if 'root_u' in hints:
+        labels['is_root_u'] = hints['root_u']
+        descriptions['is_root_u'] = 'Node is the root of component containing u'
+
+    if 'root_v' in hints:
+        labels['is_root_v'] = hints['root_v']
+        descriptions['is_root_v'] = 'Node is the root of component containing v'
+
+    return labels, descriptions
+
+
+def _extract_articulation_concepts(
+    hints: dict, source: torch.Tensor, max_steps: int
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Extract articulation point detection concepts from hints."""
+    labels = {}
+    descriptions = {}
+
+    if 'is_cut_h' in hints:
+        labels['is_cut'] = hints['is_cut_h']
+        descriptions['is_cut'] = 'Node is identified as an articulation point so far'
+
+    if 'color' in hints:
+        color = hints['color']
+        labels['is_visited'] = (color > 0).float()
+        descriptions['is_visited'] = 'Node has been discovered (gray or black)'
+        labels['is_active'] = (color == 1).float()
+        descriptions['is_active'] = 'Node is on the DFS stack (gray)'
+        labels['is_finished'] = (color == 2).float()
+        descriptions['is_finished'] = 'Node is fully explored (black)'
+
+    if 'low' in hints:
+        labels['low_value'] = hints['low']
+        descriptions['low_value'] = 'Lowest discovery time reachable from subtree'
+
+    if 'd' in hints:
+        labels['discovery_time'] = hints['d']
+        descriptions['discovery_time'] = 'DFS discovery time'
+
+    return labels, descriptions
+
+
+def _extract_bridges_concepts(
+    hints: dict, source: torch.Tensor, max_steps: int
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Extract bridge detection concepts from hints."""
+    labels = {}
+    descriptions = {}
+
+    if 'color' in hints:
+        color = hints['color']
+        labels['is_visited'] = (color > 0).float()
+        descriptions['is_visited'] = 'Node has been discovered'
+        labels['is_active'] = (color == 1).float()
+        descriptions['is_active'] = 'Node is on the DFS stack (gray)'
+        labels['is_finished'] = (color == 2).float()
+        descriptions['is_finished'] = 'Node is fully explored (black)'
+
+    if 'low' in hints:
+        labels['low_value'] = hints['low']
+        descriptions['low_value'] = 'Lowest discovery time reachable from subtree'
+
+    if 'd' in hints:
+        labels['discovery_time'] = hints['d']
+        descriptions['discovery_time'] = 'DFS discovery time'
+
+    return labels, descriptions
+
+
+def _extract_fast_mis_concepts(
+    hints: dict, source: torch.Tensor, max_steps: int
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Extract Fast MIS (maximal independent set) concepts from hints."""
+    labels = {}
+    descriptions = {}
+
+    if 'alive_h' in hints:
+        labels['is_alive'] = hints['alive_h']
+        descriptions['is_alive'] = 'Node is still a candidate (not yet decided)'
+
+    if 'inmis_h' in hints:
+        labels['in_mis'] = hints['inmis_h']
+        descriptions['in_mis'] = 'Node has been added to the independent set'
+
+    if 'phase_h' in hints:
+        labels['in_phase'] = hints['phase_h']
+        descriptions['in_phase'] = 'Node is participating in the current phase'
+
+    # Derived: just_added = in MIS at t but not at t-1
+    if 'inmis_h' in hints and hints['inmis_h'].dim() == 3 and hints['inmis_h'].shape[2] > 1:
+        inmis = hints['inmis_h']
+        just_added = torch.zeros_like(inmis)
+        just_added[:, :, 0] = inmis[:, :, 0]
+        just_added[:, :, 1:] = inmis[:, :, 1:] * (1 - inmis[:, :, :-1])
+        labels['just_added_to_mis'] = just_added
+        descriptions['just_added_to_mis'] = 'Node was just added to MIS this step'
+
+    return labels, descriptions
+
+
+def _extract_eccentricity_concepts(
+    hints: dict, source: torch.Tensor, max_steps: int
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Extract eccentricity computation concepts from hints."""
+    labels = {}
+    descriptions = {}
+
+    labels['is_source'] = source
+    descriptions['is_source'] = 'Source node for eccentricity computation'
+
+    if 'visited_h' in hints:
+        labels['is_visited'] = hints['visited_h']
+        descriptions['is_visited'] = 'Node has been visited in BFS flood'
+
+    if 'eccentricity_h' in hints:
+        labels['eccentricity'] = hints['eccentricity_h']
+        descriptions['eccentricity'] = 'Current eccentricity estimate'
 
     return labels, descriptions
 

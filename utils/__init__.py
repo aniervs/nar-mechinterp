@@ -11,6 +11,8 @@ from .visualization import (
     save_circuit_to_json,
     load_circuit_from_json,
 )
+from .correlation import pearson_correlation_matrix, find_monosemantic_features
+from .evaluation import evaluate_sae, compute_concept_analysis
 
 __all__ = [
     "HookManager",
@@ -25,4 +27,8 @@ __all__ = [
     "create_interactive_circuit",
     "save_circuit_to_json",
     "load_circuit_from_json",
+    "pearson_correlation_matrix",
+    "find_monosemantic_features",
+    "evaluate_sae",
+    "compute_concept_analysis",
 ]

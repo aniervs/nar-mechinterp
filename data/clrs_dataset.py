@@ -37,7 +37,12 @@ torch.serialization.add_safe_globals(_safe_globals)
 
 
 # Algorithms available in salsa-clrs
-AVAILABLE_ALGORITHMS = ['bfs', 'dfs', 'dijkstra', 'mst_prim', 'fast_mis', 'eccentricity']
+AVAILABLE_ALGORITHMS = [
+    'bfs', 'dfs', 'dijkstra', 'bellman_ford',
+    'mst_prim',
+    'articulation_points', 'bridges',
+    'fast_mis', 'eccentricity',
+]
 
 
 @dataclass
@@ -129,7 +134,9 @@ def _collate_clrs_batch(data_list) -> CLRSBatch:
     if len(data_list) == 0:
         raise ValueError("Empty batch")
 
-    # Determine max time steps across the batch
+    # Determine max time steps across the batch — use the actual max time
+    # dimension across all 2-D fields, not just data.length, since some
+    # algorithms (DFS-based) produce hint tensors with more steps.
     max_steps = max(d.length.item() for d in data_list)
 
     # Gather field metadata from first item
@@ -139,15 +146,30 @@ def _collate_clrs_batch(data_list) -> CLRSBatch:
     output_fields = list(first.outputs) if hasattr(first, 'outputs') else []
     all_fields = input_fields + hint_fields + output_fields
 
-    # Identify which fields are node-level vs edge-level
+    # Identify which fields are node-level vs edge-level (skip scalars)
     node_fields = {}
     edge_fields = {}
     for name in all_fields:
         val = first[name]
+        if val.dim() == 0:
+            continue  # graph-level scalar, skip
         if val.shape[0] == first.num_nodes:
             node_fields[name] = val
         elif val.shape[0] == first.num_edges:
             edge_fields[name] = val
+
+    # Compute actual max time dimension per field (may exceed data.length).
+    # Time is always dim 1 for node/edge fields: (entities, steps) or (entities, steps, categories).
+    field_max_steps: dict[str, int] = {}
+    for name in list(node_fields) + list(edge_fields):
+        field_max = 0
+        for d in data_list:
+            val = d[name]
+            if val.dim() >= 2:
+                field_max = max(field_max, val.shape[1])
+        if field_max > 0:
+            field_max_steps[name] = field_max
+            max_steps = max(max_steps, field_max)
 
     # Build batch by concatenating nodes/edges and padding time dims
     edge_indices = []
@@ -169,17 +191,18 @@ def _collate_clrs_batch(data_list) -> CLRSBatch:
 
         for name in node_fields:
             val = data[name]
-            if val.dim() == 2 and val.shape[1] < max_steps:
-                # Pad time dimension
-                pad = torch.zeros(n, max_steps - val.shape[1], dtype=val.dtype)
-                val = torch.cat([val, pad], dim=1)
+            target_steps = field_max_steps.get(name, max_steps)
+            if val.dim() >= 2 and val.shape[1] < target_steps:
+                pad_shape = (n, target_steps - val.shape[1]) + val.shape[2:]
+                val = torch.cat([val, torch.zeros(pad_shape, dtype=val.dtype)], dim=1)
             node_data[name].append(val)
 
         for name in edge_fields:
             val = data[name]
-            if val.dim() == 2 and val.shape[1] < max_steps:
-                pad = torch.zeros(e, max_steps - val.shape[1], dtype=val.dtype)
-                val = torch.cat([val, pad], dim=1)
+            target_steps = field_max_steps.get(name, max_steps)
+            if val.dim() >= 2 and val.shape[1] < target_steps:
+                pad_shape = (e, target_steps - val.shape[1]) + val.shape[2:]
+                val = torch.cat([val, torch.zeros(pad_shape, dtype=val.dtype)], dim=1)
             edge_data[name].append(val)
 
         node_offset += n
@@ -316,6 +339,68 @@ def get_algorithm_spec(algorithm: str, dataset: Optional[SALSACLRSDataset] = Non
             'mark': ('hint', 'node', 'mask', None),
             'in_queue': ('hint', 'node', 'mask', None),
             'u': ('hint', 'node', 'mask_one', None),
+        },
+        "bellman_ford": {
+            'pos': ('input', 'node', 'scalar', None),
+            's': ('input', 'node', 'mask_one', None),
+            'pi': ('output', 'node', 'pointer', None),
+            'pi_h': ('hint', 'node', 'pointer', None),
+            'd': ('hint', 'node', 'scalar', None),
+            'msk': ('hint', 'node', 'mask', None),
+        },
+        "mst_kruskal": {
+            'pos': ('input', 'node', 'scalar', None),
+            'in_mst': ('output', 'edge', 'mask', None),
+            'in_mst_h': ('hint', 'edge', 'mask', None),
+            'pi': ('hint', 'node', 'pointer', None),
+            'u': ('hint', 'node', 'mask_one', None),
+            'v': ('hint', 'node', 'mask_one', None),
+            'root_u': ('hint', 'node', 'mask_one', None),
+            'root_v': ('hint', 'node', 'mask_one', None),
+            'mask_u': ('hint', 'node', 'mask', None),
+            'mask_v': ('hint', 'node', 'mask', None),
+        },
+        "articulation_points": {
+            'pos': ('input', 'node', 'scalar', None),
+            'is_cut': ('output', 'node', 'mask', None),
+            'is_cut_h': ('hint', 'node', 'mask', None),
+            'pi_h': ('hint', 'node', 'pointer', None),
+            'color': ('hint', 'node', 'categorical', None),
+            'd': ('hint', 'node', 'scalar', None),
+            'f': ('hint', 'node', 'scalar', None),
+            'low': ('hint', 'node', 'scalar', None),
+            'child_cnt': ('hint', 'node', 'scalar', None),
+            's': ('hint', 'node', 'mask_one', None),
+            'u': ('hint', 'node', 'mask_one', None),
+            'v': ('hint', 'node', 'mask_one', None),
+        },
+        "bridges": {
+            'pos': ('input', 'node', 'scalar', None),
+            'is_bridge': ('output', 'edge', 'mask', None),
+            'is_bridge_h': ('hint', 'edge', 'mask', None),
+            'pi_h': ('hint', 'node', 'pointer', None),
+            'color': ('hint', 'node', 'categorical', None),
+            'd': ('hint', 'node', 'scalar', None),
+            'f': ('hint', 'node', 'scalar', None),
+            'low': ('hint', 'node', 'scalar', None),
+            's': ('hint', 'node', 'mask_one', None),
+            'u': ('hint', 'node', 'mask_one', None),
+            'v': ('hint', 'node', 'mask_one', None),
+        },
+        "fast_mis": {
+            'pos': ('input', 'node', 'scalar', None),
+            'inmis': ('output', 'node', 'mask', None),
+            'Ain_h': ('hint', 'edge', 'mask', None),
+            'alive_h': ('hint', 'node', 'mask', None),
+            'phase_h': ('hint', 'node', 'mask', None),
+            'inmis_h': ('hint', 'node', 'mask', None),
+        },
+        "eccentricity": {
+            'pos': ('input', 'node', 'scalar', None),
+            's': ('input', 'node', 'mask_one', None),
+            'eccentricity': ('output', 'node', 'scalar', None),
+            'visited_h': ('hint', 'node', 'mask', None),
+            'eccentricity_h': ('hint', 'node', 'scalar', None),
         },
     }
 

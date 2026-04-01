@@ -36,6 +36,7 @@ from .sae import (
 from .activation_collector import ActivationCollector, make_activation_dataloader
 from .feature_analysis import FeatureAnalyzer, FeatureAnalysisResult, FeatureStats
 from .concept_labels import ConceptLabels, extract_concept_labels, collect_concept_labels
+from .linear_probes import fit_linear_probes, save_probe_results, load_probe_results
 
 __all__ = [
     # Activation patching
@@ -82,4 +83,8 @@ __all__ = [
     "ConceptLabels",
     "extract_concept_labels",
     "collect_concept_labels",
+    # Linear probes
+    "fit_linear_probes",
+    "save_probe_results",
+    "load_probe_results",
 ]

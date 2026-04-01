@@ -388,20 +388,24 @@ class NARModel(nn.Module):
                 if name in outputs:
                     target = outputs[name]
                     out_type = output_types.get(name, 'node_mask')
-                    
+
+                    # Skip edge-level outputs that weren't converted to dense
+                    if target.shape[0] != batch_size:
+                        continue
+
                     if out_type in ['node_mask', 'edge_mask']:
-                        # Binary cross-entropy
-                        loss = F.binary_cross_entropy_with_logits(
-                            pred[:, :target.shape[-1]],
-                            target.float()
-                        )                        
-                        
+                        if pred.shape == target.shape:
+                            loss = F.binary_cross_entropy_with_logits(
+                                pred, target.float()
+                            )
+                        else:
+                            loss = F.binary_cross_entropy_with_logits(
+                                pred[:, :target.shape[-1]],
+                                target.float()
+                            )
+
                     elif out_type == 'node_pointer':
-                        # Cross-entropy over pointer targets
-                        # pred: (batch, nodes, nodes), target: (batch, nodes) indices
-                        # or target: (batch, nodes, nodes) one-hot/probabilities
                         if target.dim() == pred.dim():
-                            # One-hot or probability target — convert to indices
                             loss = F.cross_entropy(
                                 pred.reshape(-1, pred.shape[-1]),
                                 target.argmax(-1).reshape(-1)
@@ -412,49 +416,65 @@ class NARModel(nn.Module):
                                 target.reshape(-1).long()
                             )
                     else:
-                        # MSE for scalars
-                        loss = F.mse_loss(pred[:, :target.shape[-1]], target)
-                    
+                        if pred.shape == target.shape:
+                            loss = F.mse_loss(pred, target)
+                        else:
+                            loss = F.mse_loss(pred[:, :target.shape[-1]], target)
+
                     output_loss = output_loss + loss
         
         
         if hints is not None and hint_predictions is not None:
             for name, preds in hint_predictions.items():
-                if name in hints:
-                    # Data provides (batch, max_nodes, max_steps); we need steps as dim 1
-                    raw_target = hints[name]
-                    hint_type = hint_types.get(name, 'node_mask')
+                if name not in hints:
+                    continue
+                raw_target = hints[name]
+                hint_type = hint_types.get(name, 'node_mask')
 
-                    # Transpose to (batch, max_steps, max_nodes) if time is last dim
-                    if raw_target.dim() == 3:
-                        target = raw_target.permute(0, 2, 1)  # (B, T, N)
-                    else:
-                        target = raw_target
+                # Only process dense node-level hints: (B, N) or (B, N, T).
+                # Skip edge-level, graph-level, or malformed tensors.
+                if raw_target.dim() == 3 and raw_target.shape[0] == batch_size:
+                    target = raw_target.permute(0, 2, 1)  # (B, T, N)
+                elif raw_target.dim() == 2 and raw_target.shape[0] == batch_size:
+                    target = raw_target.unsqueeze(1)  # (B, 1, N)
+                else:
+                    continue
 
-                    num_steps_target = target.shape[1]
+                num_steps_target = target.shape[1]
 
-                    for step, pred in enumerate(preds):
-                        if step < num_steps_target:
-                            step_target = target[:, step]  # (B, N)
+                for step, pred in enumerate(preds):
+                    if step >= num_steps_target:
+                        break
+                    step_target = target[:, step]  # (B, N)
 
-                            if hint_type in ['node_mask']:
-                                n = step_target.shape[-1]
-                                loss = F.binary_cross_entropy_with_logits(
-                                    pred[:, :n], step_target.float()
-                                )
-                            elif hint_type == 'node_pointer':
-                                # pred: (B, N_proc, N_proc), step_target: (B, N) indices
-                                n = step_target.shape[-1]
-                                pred_trimmed = pred[:, :n, :]
-                                loss = F.cross_entropy(
-                                    pred_trimmed.reshape(-1, pred_trimmed.shape[-1]),
-                                    step_target.reshape(-1).long()
-                                )
-                            else:
-                                n = step_target.shape[-1]
-                                loss = F.mse_loss(pred[:, :n], step_target)
+                    # Verify shapes are compatible before computing loss
+                    if step_target.dim() != 1 + (pred.dim() > 2):
+                        if step_target.dim() != 1 and pred.dim() == 2:
+                            # pred is (B, N_proc), step_target should be (B, N)
+                            if step_target.dim() > 1 and step_target.shape[-1] != pred.shape[-1]:
+                                continue  # incompatible shapes, skip
 
-                            hint_loss = hint_loss + loss
+                    try:
+                        if hint_type in ['node_mask']:
+                            n = min(step_target.shape[-1], pred.shape[1])
+                            loss = F.binary_cross_entropy_with_logits(
+                                pred[:, :n], step_target[:, :n].float()
+                            )
+                        elif hint_type == 'node_pointer':
+                            n = min(step_target.shape[-1], pred.shape[1])
+                            pred_trimmed = pred[:, :n, :]
+                            loss = F.cross_entropy(
+                                pred_trimmed.reshape(-1, pred_trimmed.shape[-1]),
+                                step_target[:, :n].reshape(-1).long()
+                            )
+                        else:
+                            n = min(step_target.shape[-1], pred.shape[-1])
+                            loss = F.mse_loss(
+                                pred[:, :n], step_target[:, :n].float()
+                            )
+                        hint_loss = hint_loss + loss
+                    except (RuntimeError, IndexError):
+                        continue  # shape mismatch, skip this hint
         
         total_loss = output_loss + 0.5 * hint_loss
         
