@@ -66,11 +66,30 @@ def patch_specs(pkg_dir: Path) -> None:
         print(f"Specs already patched")
 
 
+def verify_patch(pkg_dir: Path) -> bool:
+    """Verify that the required algorithms are enabled after patching."""
+    text = (pkg_dir / "sampler.py").read_text()
+    ok = True
+    for algo in ['bellman_ford', 'articulation_points', 'bridges']:
+        # Check it's present and NOT commented out
+        if f"'{algo}'" not in text:
+            print(f"WARNING: {algo} not found in sampler.py")
+            ok = False
+        elif f"# '{algo}'" in text:
+            print(f"WARNING: {algo} is still commented out in sampler.py")
+            ok = False
+    return ok
+
+
 def main():
     pkg_dir = _find_salsaclrs()
     print(f"Found salsaclrs at: {pkg_dir}")
     patch_sampler(pkg_dir)
     patch_specs(pkg_dir)
+    if verify_patch(pkg_dir):
+        print("Verification passed.")
+    else:
+        print("WARNING: Verification failed — some algorithms may not be enabled.")
     print("Done.")
 
 

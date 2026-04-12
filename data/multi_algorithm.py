@@ -52,6 +52,8 @@ class MultiAlgorithmLoader:
         seed: int = 42,
         shuffle: Optional[bool] = None,
     ):
+        if not algorithms:
+            raise ValueError("algorithms list cannot be empty")
         self.algorithms = algorithms
         self.loaders: dict[str, DataLoader] = {}
         self.specs: dict[str, AlgorithmSpec] = {}

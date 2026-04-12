@@ -30,6 +30,7 @@ MST (Prim):
     - key_value: current key/priority (key)
 """
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -183,6 +184,9 @@ def _extract_bfs_concepts(
     labels['is_source'] = source
     descriptions['is_source'] = 'Source node of BFS traversal'
 
+    if 'reach_h' not in hints:
+        warnings.warn("BFS: 'reach_h' hint not found — is_visited/is_frontier concepts will be empty")
+
     if 'reach_h' in hints:
         reach = hints['reach_h']  # (batch, nodes, steps)
 
@@ -214,6 +218,10 @@ def _extract_dijkstra_concepts(
 
     labels['is_source'] = source
     descriptions['is_source'] = 'Source node of Dijkstra'
+
+    for key in ('mark', 'd', 'in_queue', 'u'):
+        if key not in hints:
+            warnings.warn(f"Dijkstra: '{key}' hint not found")
 
     if 'mark' in hints:
         labels['is_settled'] = hints['mark']
@@ -253,6 +261,9 @@ def _extract_dfs_concepts(
     labels['is_source'] = source
     descriptions['is_source'] = 'Source node of DFS'
 
+    if 'color' not in hints:
+        warnings.warn("DFS: 'color' hint not found — is_visited/is_active/is_finished concepts will be empty")
+
     if 'color' in hints:
         color = hints['color']  # categorical: 0=white, 1=gray, 2=black
         labels['is_visited'] = (color > 0).float()
@@ -276,6 +287,10 @@ def _extract_mst_prim_concepts(
 
     labels['is_source'] = source
     descriptions['is_source'] = 'Source/root node of MST'
+
+    for key in ('mark', 'in_queue', 'u', 'key'):
+        if key not in hints:
+            warnings.warn(f"MST Prim: '{key}' hint not found")
 
     if 'mark' in hints:
         labels['is_in_tree'] = hints['mark']
@@ -305,6 +320,10 @@ def _extract_bellman_ford_concepts(
 
     labels['is_source'] = source
     descriptions['is_source'] = 'Source node of Bellman-Ford'
+
+    for key in ('msk', 'd'):
+        if key not in hints:
+            warnings.warn(f"Bellman-Ford: '{key}' hint not found")
 
     if 'msk' in hints:
         labels['is_relaxed'] = hints['msk']
@@ -367,6 +386,10 @@ def _extract_articulation_concepts(
     labels = {}
     descriptions = {}
 
+    for key in ('is_cut_h', 'color', 'low', 'd'):
+        if key not in hints:
+            warnings.warn(f"Articulation Points: '{key}' hint not found")
+
     if 'is_cut_h' in hints:
         labels['is_cut'] = hints['is_cut_h']
         descriptions['is_cut'] = 'Node is identified as an articulation point so far'
@@ -398,6 +421,10 @@ def _extract_bridges_concepts(
     labels = {}
     descriptions = {}
 
+    for key in ('color', 'low', 'd'):
+        if key not in hints:
+            warnings.warn(f"Bridges: '{key}' hint not found")
+
     if 'color' in hints:
         color = hints['color']
         labels['is_visited'] = (color > 0).float()
@@ -424,6 +451,10 @@ def _extract_fast_mis_concepts(
     """Extract Fast MIS (maximal independent set) concepts from hints."""
     labels = {}
     descriptions = {}
+
+    for key in ('alive_h', 'inmis_h'):
+        if key not in hints:
+            warnings.warn(f"Fast MIS: '{key}' hint not found")
 
     if 'alive_h' in hints:
         labels['is_alive'] = hints['alive_h']
@@ -458,6 +489,10 @@ def _extract_eccentricity_concepts(
 
     labels['is_source'] = source
     descriptions['is_source'] = 'Source node for eccentricity computation'
+
+    for key in ('visited_h', 'eccentricity_h'):
+        if key not in hints:
+            warnings.warn(f"Eccentricity: '{key}' hint not found")
 
     if 'visited_h' in hints:
         labels['is_visited'] = hints['visited_h']

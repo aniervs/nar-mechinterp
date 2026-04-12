@@ -35,6 +35,8 @@ def evaluate_sae(
     sae.eval()
 
     n = activations.shape[0] if max_samples is None else min(max_samples, activations.shape[0])
+    if n == 0:
+        raise ValueError("No samples to evaluate (activations empty or max_samples=0)")
     sample = activations[:n]
 
     recon_list, feat_list = [], []
@@ -53,7 +55,7 @@ def evaluate_sae(
     mse = F.mse_loss(reconstructed, sample).item()
     total_var = sample.var(dim=0).sum()
     residual_var = (sample - reconstructed).var(dim=0).sum()
-    fve = (1 - residual_var / total_var).item()
+    fve = (1 - residual_var / total_var).item() if total_var > 1e-8 else 0.0
 
     dict_size = features.shape[1]
     dead_count = (features.sum(dim=0) == 0).sum().item()

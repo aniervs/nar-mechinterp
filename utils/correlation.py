@@ -17,6 +17,8 @@ def pearson_correlation_matrix(
         (D, C) tensor of Pearson correlations.
     """
     n = features.shape[0]
+    if n == 0:
+        return torch.zeros(features.shape[1], labels.shape[1])
     feat_centered = features - features.mean(dim=0, keepdim=True)
     label_centered = labels - labels.mean(dim=0, keepdim=True)
     feat_norm = feat_centered / feat_centered.std(dim=0, keepdim=True).clamp(min=1e-8)

@@ -5,6 +5,7 @@ Implements the encode-process-decode architecture for learning algorithms
 from the CLRS-30 benchmark.
 """
 
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +13,8 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 
 from .processor import Processor, TransformerProcessor
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -391,6 +394,7 @@ class NARModel(nn.Module):
 
                     # Skip edge-level outputs that weren't converted to dense
                     if target.shape[0] != batch_size:
+                        logger.debug("Skipping output '%s' (target shape %s, batch_size %d)", name, target.shape, batch_size)
                         continue
 
                     if out_type in ['node_mask', 'edge_mask']:
@@ -438,6 +442,7 @@ class NARModel(nn.Module):
                 elif raw_target.dim() == 2 and raw_target.shape[0] == batch_size:
                     target = raw_target.unsqueeze(1)  # (B, 1, N)
                 else:
+                    logger.debug("Skipping hint '%s' (shape %s, batch_size %d)", name, raw_target.shape, batch_size)
                     continue
 
                 num_steps_target = target.shape[1]
@@ -473,8 +478,9 @@ class NARModel(nn.Module):
                                 pred[:, :n], step_target[:, :n].float()
                             )
                         hint_loss = hint_loss + loss
-                    except (RuntimeError, IndexError):
-                        continue  # shape mismatch, skip this hint
+                    except (RuntimeError, IndexError) as e:
+                        logger.debug("Skipping hint '%s' step %d due to %s: %s", name, step, type(e).__name__, e)
+                        continue
         
         total_loss = output_loss + 0.5 * hint_loss
         
