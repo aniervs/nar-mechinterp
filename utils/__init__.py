@@ -13,6 +13,7 @@ from .visualization import (
 )
 from .correlation import pearson_correlation_matrix, find_monosemantic_features
 from .evaluation import evaluate_sae, compute_concept_analysis
+from .clrs_metrics import evaluate_outputs, mask_f1, pointer_accuracy, EVAL_FN
 
 __all__ = [
     "HookManager",
@@ -31,4 +32,8 @@ __all__ = [
     "find_monosemantic_features",
     "evaluate_sae",
     "compute_concept_analysis",
+    "evaluate_outputs",
+    "mask_f1",
+    "pointer_accuracy",
+    "EVAL_FN",
 ]
