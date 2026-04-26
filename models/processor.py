@@ -278,11 +278,17 @@ class Processor(nn.Module):
         dropout: float = 0.0,
         use_gating: bool = True,
         layer_norm: bool = True,
+        use_grad_checkpoint: bool = True,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        
+        # Per-step gradient checkpointing trades ~30% extra compute for a large
+        # drop in peak memory: only one step's activations live at a time during
+        # backward, instead of all num_steps × num_layers. Required to fit long
+        # algorithm trajectories (e.g. DFS, articulation_points) on a 16GB GPU.
+        self.use_grad_checkpoint = use_grad_checkpoint
+
         # Stack of message passing layers
         self.layers = nn.ModuleList([
             MessagePassingLayer(
@@ -294,13 +300,29 @@ class Processor(nn.Module):
             )
             for _ in range(num_layers)
         ])
-        
+
         # Layer-wise gating (allows skipping layers)
         self.layer_gates = nn.ParameterList([
             nn.Parameter(torch.ones(1))
             for _ in range(num_layers)
         ])
-        
+
+    def _run_step(
+        self,
+        current_nodes: torch.Tensor,
+        current_edges: torch.Tensor,
+        adjacency: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """One processing step (all layers) — checkpoint-friendly."""
+        step_nodes = current_nodes
+        step_edges = current_edges
+        for layer_idx, layer in enumerate(self.layers):
+            step_nodes, step_edges, _ = layer(step_nodes, step_edges, adjacency, mask)
+            gate = torch.sigmoid(self.layer_gates[layer_idx])
+            step_nodes = gate * step_nodes + (1 - gate) * current_nodes
+        return step_nodes, step_edges
+
     def forward(
         self,
         node_features: torch.Tensor,
@@ -312,7 +334,7 @@ class Processor(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, List]]:
         """
         Process inputs through multiple message passing steps.
-        
+
         Args:
             node_features: Initial node representations
             edge_features: Initial edge representations
@@ -320,7 +342,7 @@ class Processor(nn.Module):
             num_steps: Number of processing steps (for iterative algorithms)
             mask: Optional node mask
             return_all_activations: Whether to store activations from all steps
-            
+
         Returns:
             final_nodes: Final node representations
             final_edges: Final edge representations
@@ -331,38 +353,50 @@ class Processor(nn.Module):
             'edge_features': [],
             'layer_activations': [[] for _ in range(self.num_layers)],
         }
-        
+
         current_nodes = node_features
         current_edges = edge_features
-        
-        # Multiple processing steps (unrolling algorithm execution)
+
+        # Checkpoint only when we don't need per-layer intermediates and a
+        # backward pass is expected (training with grad enabled).
+        use_checkpoint = (
+            self.use_grad_checkpoint
+            and self.training
+            and torch.is_grad_enabled()
+            and not return_all_activations
+        )
+
         for step in range(num_steps):
-            step_nodes = current_nodes
-            step_edges = current_edges
-            
-            # Process through all layers
-            for layer_idx, layer in enumerate(self.layers):
-                step_nodes, step_edges, layer_acts = layer(
-                    step_nodes, step_edges, adjacency, mask
+            if use_checkpoint:
+                current_nodes, current_edges = torch.utils.checkpoint.checkpoint(
+                    self._run_step,
+                    current_nodes, current_edges, adjacency, mask,
+                    use_reentrant=False,
                 )
-                
-                # Apply layer gating
-                gate = torch.sigmoid(self.layer_gates[layer_idx])
-                step_nodes = gate * step_nodes + (1 - gate) * current_nodes
-                
-                if return_all_activations:
-                    all_activations['layer_activations'][layer_idx].append({
-                        'step': step,
-                        **{k: v.detach() for k, v in layer_acts.items()}
-                    })
-            
-            current_nodes = step_nodes
-            current_edges = step_edges
-            
-            if return_all_activations:
-                all_activations['node_features'].append(current_nodes.detach())
-                all_activations['edge_features'].append(current_edges.detach())
-        
+            else:
+                step_nodes = current_nodes
+                step_edges = current_edges
+                for layer_idx, layer in enumerate(self.layers):
+                    step_nodes, step_edges, layer_acts = layer(
+                        step_nodes, step_edges, adjacency, mask
+                    )
+                    gate = torch.sigmoid(self.layer_gates[layer_idx])
+                    step_nodes = gate * step_nodes + (1 - gate) * current_nodes
+
+                    if return_all_activations:
+                        all_activations['layer_activations'][layer_idx].append({
+                            'step': step,
+                            **{k: v.detach() for k, v in layer_acts.items()}
+                        })
+
+                current_nodes = step_nodes
+                current_edges = step_edges
+
+            # Per-step snapshots are cheap (detached) and required by the hint
+            # decoder, so collect them whether or not we checkpointed.
+            all_activations['node_features'].append(current_nodes.detach())
+            all_activations['edge_features'].append(current_edges.detach())
+
         return current_nodes, current_edges, all_activations
 
 
